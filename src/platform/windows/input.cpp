@@ -1131,10 +1131,17 @@ namespace platf {
     switch (pen.toolType) {
       default:
       case LI_TOOL_TYPE_PEN:
-        penInfo.penFlags &= ~PEN_FLAG_ERASER;
+        penInfo.penFlags &= ~(PEN_FLAG_INVERTED | PEN_FLAG_ERASER);
         break;
       case LI_TOOL_TYPE_ERASER:
-        penInfo.penFlags |= PEN_FLAG_ERASER;
+        // Report it like a real pen does: inverted whenever the eraser end is in range,
+        // plus the eraser flag while it touches. Most Ink apps key off PEN_FLAG_INVERTED.
+        penInfo.penFlags |= PEN_FLAG_INVERTED;
+        if (pen.eventType == LI_TOUCH_EVENT_DOWN || pen.eventType == LI_TOUCH_EVENT_MOVE) {
+          penInfo.penFlags |= PEN_FLAG_ERASER;
+        } else if (pen.eventType != LI_TOUCH_EVENT_BUTTON_ONLY) {
+          penInfo.penFlags &= ~PEN_FLAG_ERASER;
+        }
         break;
       case LI_TOOL_TYPE_UNKNOWN:
         // Leave tool flags alone
