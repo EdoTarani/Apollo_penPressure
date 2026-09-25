@@ -23,6 +23,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "virtual_tablet.h"
 
 #ifdef __MINGW32__
 // DECLARE_HANDLE(HSYNTHETICPOINTERDEVICE);
@@ -468,6 +469,11 @@ namespace platf {
     raw.fnCreateSyntheticPointerDevice = (decltype(CreateSyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "CreateSyntheticPointerDevice");
     raw.fnInjectSyntheticPointerInput = (decltype(InjectSyntheticPointerInput) *) GetProcAddress(GetModuleHandleA("user32.dll"), "InjectSyntheticPointerInput");
     raw.fnDestroySyntheticPointerDevice = (decltype(DestroySyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "DestroySyntheticPointerDevice");
+
+    // The built-in virtual Wacom tablet: served by the main instance, fed by every instance
+    if (config::input.pen_virtual_tablet && config::input.pen_virtual_tablet_host) {
+      virtual_tablet::start();
+    }
 
     return result;
   }
@@ -1042,6 +1048,26 @@ namespace platf {
    * @param pen The pen event.
    */
   static void forward_pen_to_virtual_tablet(const touch_port_t &touch_port, const pen_input_t &pen) {
+    float x = pen.x;
+    float y = pen.y;
+    if (config::input.pen_virtual_tablet_desktop && touch_port.width > 0 && touch_port.height > 0) {
+      int desktop_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+      int desktop_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+      int desktop_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+      int desktop_h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+      if (desktop_w > 0 && desktop_h > 0) {
+        x = (pen.x * touch_port.width + touch_port.offset_x - desktop_x) / (float) desktop_w;
+        y = (pen.y * touch_port.height + touch_port.offset_y - desktop_y) / (float) desktop_h;
+      }
+    }
+
+    // This instance serves the tablet: feed it directly
+    if (virtual_tablet::running()) {
+      virtual_tablet::submit(pen, x, y);
+      return;
+    }
+
+    // Another instance serves it (an extra screen, or an external vwacom): send over UDP
     static SOCKET sock = INVALID_SOCKET;
     static sockaddr_in dest {};
 
@@ -1057,19 +1083,6 @@ namespace platf {
       dest.sin_port = htons((u_short) config::input.pen_virtual_tablet_port);
       dest.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
       BOOST_LOG(info) << "Virtual tablet: forwarding pen input to udp 127.0.0.1:"sv << config::input.pen_virtual_tablet_port;
-    }
-
-    float x = pen.x;
-    float y = pen.y;
-    if (config::input.pen_virtual_tablet_desktop && touch_port.width > 0 && touch_port.height > 0) {
-      int desktop_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-      int desktop_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-      int desktop_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-      int desktop_h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-      if (desktop_w > 0 && desktop_h > 0) {
-        x = (pen.x * touch_port.width + touch_port.offset_x - desktop_x) / (float) desktop_w;
-        y = (pen.y * touch_port.height + touch_port.offset_y - desktop_y) / (float) desktop_h;
-      }
     }
 
     char pkt[24] = {'V', 'W', 'P', '1'};

@@ -577,6 +577,7 @@ namespace config {
     false,  // pen_virtual_tablet
     47000,  // pen_virtual_tablet_port
     false,  // pen_virtual_tablet_desktop
+    true,  // pen_virtual_tablet_host
     false, // enable input only mode
     true, // forward_rumble
   };
@@ -1297,6 +1298,7 @@ namespace config {
     bool_f(vars, "pen_virtual_tablet", input.pen_virtual_tablet);
     int_between_f(vars, "pen_virtual_tablet_port", input.pen_virtual_tablet_port, {1, 65535});
     bool_f(vars, "pen_virtual_tablet_desktop", input.pen_virtual_tablet_desktop);
+    bool_f(vars, "pen_virtual_tablet_host", input.pen_virtual_tablet_host);
     bool_f(vars, "enable_input_only_mode", input.enable_input_only_mode);
 
     bool_f(vars, "system_tray", sunshine.system_tray);

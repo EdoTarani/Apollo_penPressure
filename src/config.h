@@ -215,6 +215,7 @@ namespace config {
     bool pen_virtual_tablet;  ///< Forward pen events to a local virtual tablet (vwacom) instead of Windows Ink
     int pen_virtual_tablet_port;
     bool pen_virtual_tablet_desktop;  ///< Send positions relative to the whole desktop (one tablet for all screens)
+    bool pen_virtual_tablet_host;  ///< This instance serves the built-in tablet (false: forward to the one that does)
 
     bool enable_input_only_mode;
     bool forward_rumble;

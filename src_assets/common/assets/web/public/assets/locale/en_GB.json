@@ -265,7 +265,7 @@
     "native_pen_touch": "Native Pen/Touch Support",
     "native_pen_touch_desc": "When enabled, Apollo will pass through native pen/touch events from Moonlight clients. This can be useful to disable for older applications without native pen/touch support.",
     "pen_virtual_tablet": "Virtual Wacom Tablet (vwacom)",
-    "pen_virtual_tablet_desc": "When enabled, pen input from Moonlight is sent to a local virtual Wacom tablet (vwacom, udp 127.0.0.1:47000) instead of Windows Ink. The Wacom driver then provides full pressure, tilt, both pen buttons, hover and Wintab. Requires vwacom and usbip-win2 on this PC; pen input does nothing if vwacom is not running.",
+    "pen_virtual_tablet_desc": "When enabled, Apollo plugs a virtual Wacom Cintiq into this PC (needs usbip-win2) and sends pen input from Moonlight to it instead of Windows Ink. The Wacom driver then provides full pressure, tilt, both pen buttons, hover and Wintab. Nothing else to install or start.",
     "pen_virtual_tablet_desktop": "Virtual Tablet Spans All Screens",
     "pen_virtual_tablet_desktop_desc": "Send pen positions relative to the whole desktop instead of this stream's display, so one virtual tablet serves every Apollo instance (one per screen). Map the virtual Cintiq to All Displays in Wacom Tablet Properties and enable this on every instance.",
     "notify_pre_releases": "PreRelease Notifications",
