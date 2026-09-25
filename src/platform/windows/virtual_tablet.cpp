@@ -101,7 +101,7 @@ namespace platf::virtual_tablet {
     bool recv_exact(SOCKET s, uint8_t *buf, int n) {
       int got = 0;
       while (got < n) {
-        int r = recv(s, (char *) buf + got, n - got, 0);
+        int r = ::recv(s, (char *) buf + got, n - got, 0);
         if (r <= 0) {
           return false;
         }
@@ -113,7 +113,7 @@ namespace platf::virtual_tablet {
     bool send_all(SOCKET s, const std::vector<uint8_t> &data) {
       size_t sent = 0;
       while (sent < data.size()) {
-        int r = send(s, (const char *) data.data() + sent, (int) (data.size() - sent), 0);
+        int r = ::send(s, (const char *) data.data() + sent, (int) (data.size() - sent), 0);
         if (r <= 0) {
           return false;
         }
@@ -592,14 +592,14 @@ namespace platf::virtual_tablet {
         g_cv.notify_all();
       }
       pump.join();
-      closesocket(s->sock);
+      ::closesocket(s->sock);
       BOOST_LOG(info) << "Virtual tablet: detached"sv;
     }
 
     void handle_client(SOCKET c) {
       uint8_t hdr[8];
       if (!recv_exact(c, hdr, sizeof(hdr))) {
-        closesocket(c);
+        ::closesocket(c);
         return;
       }
       uint16_t code = (hdr[2] << 8) | hdr[3];
@@ -618,14 +618,14 @@ namespace platf::virtual_tablet {
         put8(v, descriptors::config[9 + 7]);
         put8(v, 0);
         send_all(c, v);
-        closesocket(c);
+        ::closesocket(c);
         return;
       }
 
       if (code == OP_REQ_IMPORT) {
         uint8_t busid[32];
         if (!recv_exact(c, busid, sizeof(busid))) {
-          closesocket(c);
+          ::closesocket(c);
           return;
         }
         std::vector<uint8_t> v;
@@ -634,7 +634,7 @@ namespace platf::virtual_tablet {
         if (std::strncmp((const char *) busid, BUSID, sizeof(busid)) != 0) {
           put32be(v, ST_NODEV);
           send_all(c, v);
-          closesocket(c);
+          ::closesocket(c);
           return;
         }
         put32be(v, ST_OK);
@@ -647,7 +647,7 @@ namespace platf::virtual_tablet {
           std::lock_guard lg(g_mutex);
           // One tablet, one attachment: a new import replaces a stale one
           if (g_session && g_session->alive) {
-            shutdown(g_session->sock, SD_BOTH);
+            ::shutdown(g_session->sock, SD_BOTH);
           }
           g_session = s;
           g_reports.clear();
@@ -657,17 +657,17 @@ namespace platf::virtual_tablet {
         if (send_all(c, v)) {
           run_session(s);
         } else {
-          closesocket(c);
+          ::closesocket(c);
         }
         return;
       }
 
-      closesocket(c);
+      ::closesocket(c);
     }
 
     void accept_loop() {
       while (!g_stopping) {
-        SOCKET c = accept(g_listen, nullptr, nullptr);
+        SOCKET c = ::accept(g_listen, nullptr, nullptr);
         if (c == INVALID_SOCKET) {
           if (g_stopping) {
             break;
@@ -676,7 +676,7 @@ namespace platf::virtual_tablet {
           continue;
         }
         BOOL nodelay = TRUE;
-        setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char *) &nodelay, sizeof(nodelay));
+        ::setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char *) &nodelay, sizeof(nodelay));
         std::thread(handle_client, c).detach();
       }
     }
@@ -685,7 +685,7 @@ namespace platf::virtual_tablet {
     void udp_loop() {
       char buf[256];
       while (!g_stopping) {
-        int n = recvfrom(g_udp, buf, sizeof(buf), 0, nullptr, nullptr);
+        int n = ::recvfrom(g_udp, buf, sizeof(buf), 0, nullptr, nullptr);
         if (n < 24) {
           if (n == SOCKET_ERROR && g_stopping) {
             break;
@@ -806,12 +806,12 @@ namespace platf::virtual_tablet {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // local only: nothing is exposed to the network
 
-    g_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    g_listen = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     addr.sin_port = htons(USBIP_TCP_PORT);
-    if (g_listen == INVALID_SOCKET || bind(g_listen, (sockaddr *) &addr, sizeof(addr)) != 0 || listen(g_listen, 4) != 0) {
+    if (g_listen == INVALID_SOCKET || ::bind(g_listen, (sockaddr *) &addr, sizeof(addr)) != 0 || ::listen(g_listen, 4) != 0) {
       BOOST_LOG(error) << "Virtual tablet: can't listen on 127.0.0.1:"sv << USBIP_TCP_PORT << " ("sv << WSAGetLastError() << ')';
       if (g_listen != INVALID_SOCKET) {
-        closesocket(g_listen);
+        ::closesocket(g_listen);
         g_listen = INVALID_SOCKET;
       }
       g_running = false;
@@ -819,15 +819,15 @@ namespace platf::virtual_tablet {
     }
     g_accept_thread = std::thread(accept_loop);
 
-    g_udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    g_udp = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     addr.sin_port = htons((u_short) config::input.pen_virtual_tablet_port);
-    if (g_udp != INVALID_SOCKET && bind(g_udp, (sockaddr *) &addr, sizeof(addr)) == 0) {
+    if (g_udp != INVALID_SOCKET && ::bind(g_udp, (sockaddr *) &addr, sizeof(addr)) == 0) {
       g_udp_thread = std::thread(udp_loop);
     } else {
       BOOST_LOG(warning) << "Virtual tablet: can't receive pen events on udp 127.0.0.1:"sv << config::input.pen_virtual_tablet_port
                          << " ("sv << WSAGetLastError() << "); only this instance's pen input will reach the tablet"sv;
       if (g_udp != INVALID_SOCKET) {
-        closesocket(g_udp);
+        ::closesocket(g_udp);
         g_udp = INVALID_SOCKET;
       }
     }
@@ -842,17 +842,17 @@ namespace platf::virtual_tablet {
     }
     g_stopping = true;
     if (g_listen != INVALID_SOCKET) {
-      closesocket(g_listen);
+      ::closesocket(g_listen);
       g_listen = INVALID_SOCKET;
     }
     if (g_udp != INVALID_SOCKET) {
-      closesocket(g_udp);
+      ::closesocket(g_udp);
       g_udp = INVALID_SOCKET;
     }
     {
       std::lock_guard lg(g_mutex);
       if (g_session && g_session->alive) {
-        shutdown(g_session->sock, SD_BOTH);
+        ::shutdown(g_session->sock, SD_BOTH);
       }
     }
     if (g_accept_thread.joinable()) {
