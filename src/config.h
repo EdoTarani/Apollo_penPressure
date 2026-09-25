@@ -212,6 +212,8 @@ namespace config {
 
     bool high_resolution_scrolling;
     bool native_pen_touch;
+    bool pen_virtual_tablet;  ///< Forward pen events to a local virtual tablet (vwacom) instead of Windows Ink
+    int pen_virtual_tablet_port;
 
     bool enable_input_only_mode;
     bool forward_rumble;

@@ -263,6 +263,8 @@
     "mouse_desc": "Allows guests to control the host system with the mouse",
     "native_pen_touch": "Native Pen/Touch Support",
     "native_pen_touch_desc": "When enabled, Apollo will pass through native pen/touch events from Moonlight clients. This can be useful to disable for older applications without native pen/touch support.",
+    "pen_virtual_tablet": "Virtual Wacom Tablet (vwacom)",
+    "pen_virtual_tablet_desc": "When enabled, pen input from Moonlight is sent to a local virtual Wacom tablet (vwacom, udp 127.0.0.1:47000) instead of Windows Ink. The Wacom driver then provides full pressure, tilt, both pen buttons, hover and Wintab. Requires vwacom and usbip-win2 on this PC; pen input does nothing if vwacom is not running.",
     "notify_pre_releases": "PreRelease Notifications",
     "notify_pre_releases_desc": "Whether to be notified of new pre-release versions of Apollo",
     "nvenc_h264_cavlc": "Prefer CAVLC over CABAC in H.264",

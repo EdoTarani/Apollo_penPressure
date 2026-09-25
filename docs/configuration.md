@@ -687,6 +687,58 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### pen_virtual_tablet
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            When enabled, pen events from Moonlight clients are forwarded over UDP to a local virtual Wacom
+            tablet (vwacom) instead of being injected through Windows Ink. The Wacom driver then provides
+            full pressure resolution, tilt, both barrel buttons, hover and Wintab.
+            <br>
+            Packet format (24 bytes, little-endian): "VWP1", eventType, toolType, penButtons, pad,
+            x, y, pressureOrDistance (float32), rotation (uint16), tilt, pad.
+            @note{Windows only. Requires native_pen_touch.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            pen_virtual_tablet = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### pen_virtual_tablet_port
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Local UDP port the virtual tablet listens on (always 127.0.0.1).
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            47000
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            pen_virtual_tablet_port = 47000
+            @endcode</td>
+    </tr>
+</table>
+
 ### keybindings
 
 <table>

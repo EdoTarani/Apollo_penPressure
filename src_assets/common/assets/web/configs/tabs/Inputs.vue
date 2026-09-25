@@ -177,6 +177,15 @@ const config = ref(props.config)
               default="true"
     ></Checkbox>
 
+    <!-- Forward pen input to a local virtual Wacom tablet (vwacom) -->
+    <Checkbox v-if="platform === 'windows' && config.mouse === 'enabled' && config.native_pen_touch === 'enabled'"
+              class="mb-3"
+              id="pen_virtual_tablet"
+              locale-prefix="config"
+              v-model="config.pen_virtual_tablet"
+              default="false"
+    ></Checkbox>
+
     <!-- Enable Input Only Mode -->
     <hr>
     <Checkbox class="mb-3"

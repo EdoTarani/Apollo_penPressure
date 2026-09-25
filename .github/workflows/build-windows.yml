@@ -1,0 +1,94 @@
+---
+# Builds the Windows installer for this fork (Apollo + virtual Wacom tablet forwarding).
+# Upstream Apollo ships without CI; this follows docs/building.md and LizardByte/Sunshine's ci-windows.yml.
+name: Build Windows
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ucrt64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-nlohmann-json
+
+      # Official Node.js, not MSYS2's (see docs/building.md)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Node.js path
+        shell: pwsh
+        run: |
+          $NODEJS_PATH = Split-Path -Path (Get-Command node).Source -Parent
+          echo "NODEJS_PATH=$NODEJS_PATH" >> $env:GITHUB_ENV
+
+      - name: Build
+        env:
+          BRANCH: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          export PATH="$PATH:$(cygpath "$NODEJS_PATH")"
+          cmake -B build -G Ninja -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_TESTS=OFF \
+            -DSUNSHINE_PUBLISHER_NAME="${GITHUB_REPOSITORY_OWNER}" \
+            -DSUNSHINE_PUBLISHER_WEBSITE="https://github.com/${GITHUB_REPOSITORY}" \
+            -DSUNSHINE_PUBLISHER_ISSUE_URL="https://github.com/${GITHUB_REPOSITORY}/issues"
+          ninja -C build
+
+      - name: Package
+        run: |
+          cd build
+          cpack -G NSIS
+          cpack -G ZIP
+          ls -la cpack_artifacts
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Apollo-vwacom-windows-${{ github.sha }}
+          path: |
+            build/cpack_artifacts/*.exe
+            build/cpack_artifacts/*.zip
+          if-no-files-found: error

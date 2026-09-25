@@ -5,10 +5,12 @@
 #define WINVER 0x0A00
 
 // platform includes
+#include <winsock2.h>  // must precede Windows.h
 #include <Windows.h>
 
 // standard includes
 #include <cmath>
+#include <cstring>
 #include <thread>
 
 // lib includes
@@ -1026,6 +1028,47 @@ namespace platf {
   }
 
   /**
+   * @brief Forward a pen event to a local virtual tablet (vwacom) over UDP.
+   * @details The virtual tablet presents a real Wacom device to the Wacom driver, which gives
+   * full pressure resolution, tilt, both barrel buttons, hover and Wintab — none of which
+   * Windows Ink injection provides. The packet mirrors LiSendPenEvent, little-endian:
+   * "VWP1", eventType, toolType, penButtons, pad, x, y, pressureOrDistance (float32),
+   * rotation (uint16), tilt, pad — 24 bytes.
+   * @param pen The pen event.
+   */
+  static void forward_pen_to_virtual_tablet(const pen_input_t &pen) {
+    static SOCKET sock = INVALID_SOCKET;
+    static sockaddr_in dest {};
+
+    if (sock == INVALID_SOCKET) {
+      WSADATA wsaData;
+      WSAStartup(MAKEWORD(2, 2), &wsaData);
+      sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      if (sock == INVALID_SOCKET) {
+        BOOST_LOG(warning) << "Virtual tablet: failed to create UDP socket: "sv << WSAGetLastError();
+        return;
+      }
+      dest.sin_family = AF_INET;
+      dest.sin_port = htons((u_short) config::input.pen_virtual_tablet_port);
+      dest.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      BOOST_LOG(info) << "Virtual tablet: forwarding pen input to udp 127.0.0.1:"sv << config::input.pen_virtual_tablet_port;
+    }
+
+    char pkt[24] = {'V', 'W', 'P', '1'};
+    pkt[4] = (char) pen.eventType;
+    pkt[5] = (char) pen.toolType;
+    pkt[6] = (char) pen.penButtons;
+    pkt[7] = 0;
+    std::memcpy(pkt + 8, &pen.x, 4);
+    std::memcpy(pkt + 12, &pen.y, 4);
+    std::memcpy(pkt + 16, &pen.pressureOrDistance, 4);
+    std::memcpy(pkt + 20, &pen.rotation, 2);
+    pkt[22] = (char) pen.tilt;
+    pkt[23] = 0;
+    sendto(sock, pkt, sizeof(pkt), 0, (const sockaddr *) &dest, sizeof(dest));
+  }
+
+  /**
    * @brief Sends a pen event to the OS.
    * @param input The client-specific input context.
    * @param touch_port The current viewport for translating to screen coordinates.
@@ -1033,6 +1076,11 @@ namespace platf {
    */
   void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen) {
     auto raw = (client_input_raw_t *) input;
+
+    if (config::input.pen_virtual_tablet) {
+      forward_pen_to_virtual_tablet(pen);
+      return;
+    }
 
     // Bail if we're not running on an OS that supports virtual pen input
     if (!raw->global->fnCreateSyntheticPointerDevice ||

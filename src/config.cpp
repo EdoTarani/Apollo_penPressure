@@ -574,6 +574,8 @@ namespace config {
     true,  // always send scancodes
     true,  // high resolution scrolling
     true,  // native pen/touch support
+    false,  // pen_virtual_tablet
+    47000,  // pen_virtual_tablet_port
     false, // enable input only mode
     true, // forward_rumble
   };
@@ -1291,6 +1293,8 @@ namespace config {
 
     bool_f(vars, "high_resolution_scrolling", input.high_resolution_scrolling);
     bool_f(vars, "native_pen_touch", input.native_pen_touch);
+    bool_f(vars, "pen_virtual_tablet", input.pen_virtual_tablet);
+    int_between_f(vars, "pen_virtual_tablet_port", input.pen_virtual_tablet_port, {1, 65535});
     bool_f(vars, "enable_input_only_mode", input.enable_input_only_mode);
 
     bool_f(vars, "system_tray", sunshine.system_tray);
