@@ -17,6 +17,7 @@
 
 // local includes
 #include "extra_screens.h"
+#include "misc.h"
 #include "src/config.h"
 #include "src/logging.h"
 
@@ -39,7 +40,7 @@ namespace platf::extra_screens {
 
     /// Keys an extra screen must not inherit from the main configuration
     const std::set<std::string> own_keys {
-      "port", "sunshine_name", "file_state", "credentials_file", "paired_devices_file", "log_path",
+      "port", "sunshine_name", "file_state", "credentials_file", "paired_devices_file", "extra_screen_index", "log_path",
       "output_name", "headless_mode", "stream_audio", "system_tray", "extra_screens",
       "pen_virtual_tablet_host", "pen_virtual_tablet_desktop",
     };
@@ -73,6 +74,7 @@ namespace platf::extra_screens {
       out << "file_state = " << (dir / ("sunshine_state_" + suffix + ".json")).string() << '\n';
       out << "credentials_file = " << fs::absolute(config::sunshine.credentials_file).string() << '\n';
       out << "paired_devices_file = " << fs::absolute(config::nvhttp.file_state).string() << '\n';
+      out << "extra_screen_index = " << screen << '\n';  // its own virtual display, not the main one's
       out << "log_path = " << (dir / ("sunshine_" + suffix + ".log")).string() << '\n';
       out << "headless_mode = enabled\n";  // always its own virtual display
       out << "stream_audio = disabled\n";  // only the main screen plays sound
@@ -84,6 +86,56 @@ namespace platf::extra_screens {
       auto path = dir / ("sunshine_" + suffix + ".conf");
       std::ofstream(path, std::ios::trunc) << out.str();
       return path;
+    }
+
+    constexpr const wchar_t *FIREWALL_RULE = L"Apollo extra screens";
+
+    /// Run netsh hidden and wait for it
+    DWORD run_netsh(const std::wstring &args) {
+      wchar_t system_dir[MAX_PATH];
+      GetSystemDirectoryW(system_dir, MAX_PATH);
+      std::wstring exe = std::wstring(system_dir) + L"\\netsh.exe";
+      std::wstring cmd = L"\"" + exe + L"\" " + args;
+
+      STARTUPINFOW si {};
+      si.cb = sizeof(si);
+      PROCESS_INFORMATION pi {};
+      if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        return GetLastError();
+      }
+      WaitForSingleObject(pi.hProcess, 15000);
+      DWORD code = 1;
+      GetExitCodeProcess(pi.hProcess, &code);
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+      return code;
+    }
+
+    /**
+     * Inbound firewall rules for exactly the extra screens' ports (each screen uses its base
+     * port -5 .. +21, like the main instance). Some managed firewalls don't honour Apollo's
+     * per-program rule for new ports, so allow the ports themselves. Replaced on every start,
+     * removed when extra screens are turned off.
+     */
+    void update_firewall(int count) {
+      run_netsh(L"advfirewall firewall delete rule name=\"" + std::wstring(FIREWALL_RULE) + L"\"");
+      if (count <= 0) {
+        return;
+      }
+
+      std::wstring ports;
+      for (int n = 1; n <= count; n++) {
+        int base = config::sunshine.port + 1000 * n;
+        ports += (ports.empty() ? L"" : L",") + std::to_wstring(base - 5) + L"-" + std::to_wstring(base + 21);
+      }
+      for (const wchar_t *protocol : {L"TCP", L"UDP"}) {
+        auto code = run_netsh(L"advfirewall firewall add rule name=\"" + std::wstring(FIREWALL_RULE) +
+                              L"\" dir=in action=allow protocol=" + protocol + L" localport=" + ports);
+        if (code != 0) {
+          BOOST_LOG(warning) << "Extra screens: couldn't add the firewall rule ("sv << code << "); other PCs may not reach them"sv;
+        }
+      }
+      BOOST_LOG(info) << "Extra screens: firewall allows ports "sv << platf::to_utf8(ports);
     }
 
     bool launch(child_t &child) {
@@ -142,7 +194,13 @@ namespace platf::extra_screens {
 
   void start() {
     int count = config::nvhttp.extra_screens;
-    if (count <= 0 || !config::nvhttp.paired_devices_file.empty() || g_job) {
+    if (config::nvhttp.extra_screen_index > 0 || g_job) {
+      return;  // an extra screen itself, or already started
+    }
+
+    // Open (or, when turned off, close) exactly the extra screens' ports
+    update_firewall(count);
+    if (count <= 0) {
       return;
     }
 

@@ -276,6 +276,15 @@ namespace proc {
           device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
         }
 
+        // An extra screen is streamed to the same client as the main screen; give it its own
+        // virtual display (a distinct, stable GUID per screen) so Windows extends the desktop
+        // instead of every instance sharing, and mirroring, the one display.
+        if (config::nvhttp.extra_screen_index > 0) {
+          device_uuid.b64[1] ^= 0x5343524545000000ull | (uint64_t) config::nvhttp.extra_screen_index;  // "SCREE" + index
+          device_uuid_str = device_uuid.string();
+          device_name += " Screen " + std::to_string(config::nvhttp.extra_screen_index);
+        }
+
         memcpy(&launch_session->display_guid, &device_uuid, sizeof(GUID));
 
         int target_fps = launch_session->fps ? launch_session->fps : 60000;

@@ -549,6 +549,7 @@ namespace config {
     {},  // external_ip
     0,  // extra_screens
     {},  // paired_devices_file
+    0,  // extra_screen_index
   };
 
   input_t input {
@@ -1230,6 +1231,7 @@ namespace config {
     int_between_f(vars, "extra_screens", nvhttp.extra_screens, {0, 2});
     // Plain string, not path_f: path_f would turn "unset" into the config directory
     string_f(vars, "paired_devices_file", nvhttp.paired_devices_file);
+    int_between_f(vars, "extra_screen_index", nvhttp.extra_screen_index, {0, 9});
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
     list_prep_cmd_f(vars, "global_state_cmd", config::sunshine.state_cmds);
     list_server_cmd_f(vars, "server_cmd", config::sunshine.server_cmds);
