@@ -716,6 +716,32 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### pen_virtual_tablet_desktop
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Send virtual tablet positions relative to the whole virtual desktop instead of this stream's
+            display. One virtual tablet, mapped to "All Displays" in the Wacom driver, then serves every
+            Apollo instance (one instance per screen), and the pen moves between screens seamlessly.
+            @note{Enable it on every instance that forwards to the same virtual tablet.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            pen_virtual_tablet_desktop = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### pen_virtual_tablet_port
 
 <table>

@@ -1034,9 +1034,14 @@ namespace platf {
    * Windows Ink injection provides. The packet mirrors LiSendPenEvent, little-endian:
    * "VWP1", eventType, toolType, penButtons, pad, x, y, pressureOrDistance (float32),
    * rotation (uint16), tilt, pad — 24 bytes.
+   *
+   * With pen_virtual_tablet_desktop, x/y are rescaled from this stream's display to the whole
+   * virtual desktop, so one virtual tablet mapped to "All Displays" serves every Apollo instance
+   * (one per screen) and the pen crosses between screens seamlessly.
+   * @param touch_port This stream's display, in desktop pixels.
    * @param pen The pen event.
    */
-  static void forward_pen_to_virtual_tablet(const pen_input_t &pen) {
+  static void forward_pen_to_virtual_tablet(const touch_port_t &touch_port, const pen_input_t &pen) {
     static SOCKET sock = INVALID_SOCKET;
     static sockaddr_in dest {};
 
@@ -1054,13 +1059,26 @@ namespace platf {
       BOOST_LOG(info) << "Virtual tablet: forwarding pen input to udp 127.0.0.1:"sv << config::input.pen_virtual_tablet_port;
     }
 
+    float x = pen.x;
+    float y = pen.y;
+    if (config::input.pen_virtual_tablet_desktop && touch_port.width > 0 && touch_port.height > 0) {
+      int desktop_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+      int desktop_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+      int desktop_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+      int desktop_h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+      if (desktop_w > 0 && desktop_h > 0) {
+        x = (pen.x * touch_port.width + touch_port.offset_x - desktop_x) / (float) desktop_w;
+        y = (pen.y * touch_port.height + touch_port.offset_y - desktop_y) / (float) desktop_h;
+      }
+    }
+
     char pkt[24] = {'V', 'W', 'P', '1'};
     pkt[4] = (char) pen.eventType;
     pkt[5] = (char) pen.toolType;
     pkt[6] = (char) pen.penButtons;
     pkt[7] = 0;
-    std::memcpy(pkt + 8, &pen.x, 4);
-    std::memcpy(pkt + 12, &pen.y, 4);
+    std::memcpy(pkt + 8, &x, 4);
+    std::memcpy(pkt + 12, &y, 4);
     std::memcpy(pkt + 16, &pen.pressureOrDistance, 4);
     std::memcpy(pkt + 20, &pen.rotation, 2);
     pkt[22] = (char) pen.tilt;
@@ -1078,7 +1096,7 @@ namespace platf {
     auto raw = (client_input_raw_t *) input;
 
     if (config::input.pen_virtual_tablet) {
-      forward_pen_to_virtual_tablet(pen);
+      forward_pen_to_virtual_tablet(touch_port, pen);
       return;
     }
 

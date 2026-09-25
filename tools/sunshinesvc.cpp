@@ -18,6 +18,9 @@ SERVICE_STATUS service_status;
 HANDLE stop_event;
 HANDLE session_change_event;
 
+// Optional config file for an additional instance (--config <file>); empty for the default instance
+std::wstring instance_config;
+
 #define SERVICE_NAME "ApolloService"
 
 DWORD WINAPI HandlerEx(DWORD dwControl, DWORD dwEventType, LPVOID lpEventData, LPVOID lpContext) {
@@ -119,9 +122,16 @@ HANDLE DuplicateTokenForSession(DWORD console_session_id) {
 HANDLE OpenLogFileHandle() {
   WCHAR log_file_name[MAX_PATH];
 
-  // Create sunshine.log in the Temp folder (usually %SYSTEMROOT%\Temp)
+  // Create sunshine.log in the Temp folder (usually %SYSTEMROOT%\Temp);
+  // additional instances get sunshine-<config name>.log
   GetTempPathW(_countof(log_file_name), log_file_name);
-  wcscat_s(log_file_name, L"sunshine.log");
+  if (instance_config.empty()) {
+    wcscat_s(log_file_name, L"sunshine.log");
+  } else {
+    std::wstring stem = instance_config.substr(instance_config.find_last_of(L"\\/") + 1);
+    stem = stem.substr(0, stem.find_last_of(L'.'));
+    wcscat_s(log_file_name, (L"sunshine-" + stem + L".log").c_str());
+  }
 
   // The file handle must be inheritable for our child process to use it
   SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), nullptr, TRUE};
@@ -263,8 +273,11 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
     // Start Sunshine.exe inside our job object
     UpdateProcThreadAttribute(startup_info.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job_handle, sizeof(job_handle), nullptr, nullptr);
 
+    // Additional instances pass their config file to Sunshine.exe
+    std::wstring command_line = instance_config.empty() ? L"" : L"Sunshine.exe \"" + instance_config + L"\"";
+
     PROCESS_INFORMATION process_info;
-    if (!CreateProcessAsUserW(console_token, L"Sunshine.exe", nullptr, nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, (LPSTARTUPINFOW) &startup_info, &process_info)) {
+    if (!CreateProcessAsUserW(console_token, L"Sunshine.exe", command_line.empty() ? nullptr : command_line.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, (LPSTARTUPINFOW) &startup_info, &process_info)) {
       CloseHandle(console_token);
       CloseHandle(job_handle);
       continue;
@@ -346,6 +359,14 @@ int main(int argc, char *argv[]) {
   // Check if this is a reinvocation of ourselves to send Ctrl-C to Sunshine.exe
   if (argc == 3 && strcmp(argv[1], "--terminate") == 0) {
     return DoGracefulTermination(atol(argv[2]));
+  }
+
+  // An additional instance: sunshinesvc.exe --config <path to its sunshine_N.conf>
+  // (installed as its own service; see scripts in the vwacom package)
+  if (argc == 3 && strcmp(argv[1], "--config") == 0) {
+    int len = MultiByteToWideChar(CP_ACP, 0, argv[2], -1, nullptr, 0);
+    instance_config.resize(len > 0 ? len - 1 : 0);
+    MultiByteToWideChar(CP_ACP, 0, argv[2], -1, instance_config.data(), len);
   }
 
   // By default, services have their current directory set to %SYSTEMROOT%\System32.

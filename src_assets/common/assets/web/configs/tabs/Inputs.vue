@@ -186,6 +186,15 @@ const config = ref(props.config)
               default="false"
     ></Checkbox>
 
+    <!-- One virtual tablet across all screens -->
+    <Checkbox v-if="platform === 'windows' && config.mouse === 'enabled' && config.native_pen_touch === 'enabled' && config.pen_virtual_tablet === 'enabled'"
+              class="mb-3"
+              id="pen_virtual_tablet_desktop"
+              locale-prefix="config"
+              v-model="config.pen_virtual_tablet_desktop"
+              default="false"
+    ></Checkbox>
+
     <!-- Enable Input Only Mode -->
     <hr>
     <Checkbox class="mb-3"
