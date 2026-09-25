@@ -24,6 +24,7 @@
 #include "video.h"
 
 #ifdef _WIN32
+  #include "platform/windows/extra_screens.h"
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
 #endif
@@ -432,6 +433,9 @@ int main(int argc, char *argv[]) {
   std::thread rtspThread {rtsp_stream::start};
 
 #ifdef _WIN32
+  // Companion instances for extra screens (config extra_screens)
+  platf::extra_screens::start();
+
   // If we're using the default port and GameStream is enabled, warn the user
   if (config::sunshine.port == 47989 && is_gamestream_enabled()) {
     BOOST_LOG(fatal) << "GameStream is still enabled in GeForce Experience! This *will* cause streaming problems with Apollo!"sv;
@@ -457,6 +461,10 @@ int main(int argc, char *argv[]) {
 
   // Wait for shutdown, this is not necessary when we're using the main event loop
   shutdown_event->view();
+
+#ifdef _WIN32
+  platf::extra_screens::stop();
+#endif
 
   httpThread.join();
   configThread.join();

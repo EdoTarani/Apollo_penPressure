@@ -152,6 +152,17 @@ const validateFallbackMode = (event) => {
               v-if="platform === 'windows'"
     ></Checkbox>
 
+    <!-- Extra Screens -->
+    <div class="mb-3" v-if="platform === 'windows'">
+      <label for="extra_screens" class="form-label">{{ $t('config.extra_screens') }}</label>
+      <select id="extra_screens" class="form-select" v-model="config.extra_screens">
+        <option value="0">{{ $t('config.extra_screens_0') }}</option>
+        <option value="1">{{ $t('config.extra_screens_1') }}</option>
+        <option value="2">{{ $t('config.extra_screens_2') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.extra_screens_desc') }}</div>
+    </div>
+
     <!-- Double Refreshrate -->
     <Checkbox class="mb-3"
               id="double_refreshrate"

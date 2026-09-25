@@ -61,6 +61,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_display.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/extra_screens.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/extra_screens.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_tablet.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_tablet.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_tablet_descriptors.h"

@@ -286,7 +286,23 @@ namespace nvhttp {
     }
   }
 
-  void load_state() {
+  p_named_cert_t named_cert_from_json(const nlohmann::json &el) {
+    auto named_cert_p = std::make_shared<crypto::named_cert_t>();
+    named_cert_p->name = el.value("name", "");
+    named_cert_p->cert = el.value("cert", "");
+    named_cert_p->uuid = el.value("uuid", "");
+    named_cert_p->display_mode = el.value("display_mode", "");
+    named_cert_p->perm = (PERM)(util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t)PERM::_all)) & PERM::_all;
+    named_cert_p->enable_legacy_ordering = el.value("enable_legacy_ordering", true);
+    named_cert_p->allow_client_commands = el.value("allow_client_commands", true);
+    named_cert_p->always_use_virtual_display = el.value("always_use_virtual_display", false);
+    // Load command entries for "do" and "undo" keys.
+    named_cert_p->do_cmds = extract_command_entries(el, "do");
+    named_cert_p->undo_cmds = extract_command_entries(el, "undo");
+    return named_cert_p;
+  }
+
+  void load_own_state() {
     if (!fs::exists(config::nvhttp.file_state)) {
       BOOST_LOG(info) << "File "sv << config::nvhttp.file_state << " doesn't exist"sv;
       http::unique_id = uuid_util::uuid_t::generate().string();
@@ -340,19 +356,7 @@ namespace nvhttp {
     // Import from the new format.
     if (root.contains("named_devices")) {
       for (auto &el : root["named_devices"]) {
-        auto named_cert_p = std::make_shared<crypto::named_cert_t>();
-        named_cert_p->name = el.value("name", "");
-        named_cert_p->cert = el.value("cert", "");
-        named_cert_p->uuid = el.value("uuid", "");
-        named_cert_p->display_mode = el.value("display_mode", "");
-        named_cert_p->perm = (PERM)(util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t)PERM::_all)) & PERM::_all;
-        named_cert_p->enable_legacy_ordering = el.value("enable_legacy_ordering", true);
-        named_cert_p->allow_client_commands = el.value("allow_client_commands", true);
-        named_cert_p->always_use_virtual_display = el.value("always_use_virtual_display", false);
-        // Load command entries for "do" and "undo" keys.
-        named_cert_p->do_cmds = extract_command_entries(el, "do");
-        named_cert_p->undo_cmds = extract_command_entries(el, "undo");
-        client.named_devices.emplace_back(named_cert_p);
+        client.named_devices.emplace_back(named_cert_from_json(el));
       }
     }
 
@@ -363,6 +367,42 @@ namespace nvhttp {
     }
 
     client_root = client;
+  }
+
+  /**
+   * @brief Extra screens (companion instances) trust exactly the devices paired with the main
+   * instance: replace this instance's devices with the ones in paired_devices_file.
+   */
+  void load_shared_devices() {
+    nlohmann::json tree;
+    try {
+      std::ifstream in(config::nvhttp.paired_devices_file);
+      in >> tree;
+    } catch (std::exception &e) {
+      BOOST_LOG(warning) << "Couldn't read paired devices from "sv << config::nvhttp.paired_devices_file << ": "sv << e.what();
+      return;
+    }
+
+    client_t client;
+    if (tree.contains("root") && tree["root"].contains("named_devices")) {
+      for (auto &el : tree["root"]["named_devices"]) {
+        client.named_devices.emplace_back(named_cert_from_json(el));
+      }
+    }
+
+    cert_chain.clear();
+    for (auto &named_cert : client.named_devices) {
+      cert_chain.add(named_cert);
+    }
+    client_root = client;
+    BOOST_LOG(info) << "Trusting "sv << client.named_devices.size() << " device(s) paired with the main instance"sv;
+  }
+
+  void load_state() {
+    load_own_state();
+    if (!config::nvhttp.paired_devices_file.empty()) {
+      load_shared_devices();
+    }
   }
 
   void add_authorized_client(const p_named_cert_t& named_cert_p) {
@@ -1688,6 +1728,11 @@ namespace nvhttp {
       });
 
       auto err_str = cert_chain.verify(x509.get(), named_cert_p);
+      if (err_str && !config::nvhttp.paired_devices_file.empty()) {
+        // An extra screen: the device may have been paired with the main instance since we loaded
+        load_shared_devices();
+        err_str = cert_chain.verify(x509.get(), named_cert_p);
+      }
       if (err_str) {
         BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
         return verified;

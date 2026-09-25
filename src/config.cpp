@@ -547,6 +547,8 @@ namespace config {
     platf::get_host_name(),  // sunshine_name,
     "sunshine_state.json"s,  // file_state
     {},  // external_ip
+    0,  // extra_screens
+    {},  // paired_devices_file
   };
 
   input_t input {
@@ -1225,6 +1227,9 @@ namespace config {
     path_f(vars, "credentials_file", config::sunshine.credentials_file);
 
     string_f(vars, "external_ip", nvhttp.external_ip);
+    int_between_f(vars, "extra_screens", nvhttp.extra_screens, {0, 2});
+    // Plain string, not path_f: path_f would turn "unset" into the config directory
+    string_f(vars, "paired_devices_file", nvhttp.paired_devices_file);
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
     list_prep_cmd_f(vars, "global_state_cmd", config::sunshine.state_cmds);
     list_server_cmd_f(vars, "server_cmd", config::sunshine.server_cmds);

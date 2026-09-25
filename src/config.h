@@ -189,6 +189,9 @@ namespace config {
     std::string file_state;
 
     std::string external_ip;
+
+    int extra_screens;  ///< Extra screens (companion instances) this instance starts, 0..2
+    std::string paired_devices_file;  ///< Companion instances: trust the devices paired in this state file
   };
 
   struct input_t {
