@@ -144,11 +144,45 @@ namespace platf::extra_screens {
       std::wstring cmd = L"\"" + std::wstring(exe) + L"\" \"" + child.config_path + L"\"";
       auto dir = fs::path(exe).parent_path().wstring();
 
-      STARTUPINFOW si {};
-      si.cb = sizeof(si);
+      // Capture the child's console output (the virtual display driver helpers only printf)
+      // next to its log: config\sunshine_screenN.console.log. Only that handle is inherited.
+      auto console_path = (fs::path(child.config_path).parent_path() /
+                           ("sunshine_screen" + std::to_string(child.screen) + ".console.log")).wstring();
+      SECURITY_ATTRIBUTES sa {sizeof(sa), nullptr, TRUE};
+      HANDLE console = CreateFileW(console_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, 0, nullptr);
+
+      STARTUPINFOEXW si {};
+      si.StartupInfo.cb = sizeof(si);
+      SIZE_T attr_size = 0;
+      InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+      std::vector<uint8_t> attr_buf(attr_size);
+      bool inherit = false;
+      if (console != INVALID_HANDLE_VALUE) {
+        si.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST) attr_buf.data();
+        if (InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attr_size) &&
+            UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &console, sizeof(console), nullptr, nullptr)) {
+          si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+          si.StartupInfo.hStdOutput = console;
+          si.StartupInfo.hStdError = console;
+          inherit = true;
+        } else {
+          si.lpAttributeList = nullptr;
+        }
+      }
+
       PROCESS_INFORMATION pi {};
-      if (!CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, dir.c_str(), &si, &pi)) {
-        BOOST_LOG(error) << "Extra screen "sv << child.screen << ": couldn't start ("sv << GetLastError() << ')';
+      BOOL ok = CreateProcessW(exe, cmd.data(), nullptr, nullptr, inherit ? TRUE : FALSE,
+                               CREATE_NO_WINDOW | CREATE_SUSPENDED | (inherit ? EXTENDED_STARTUPINFO_PRESENT : 0),
+                               nullptr, dir.c_str(), (LPSTARTUPINFOW) &si, &pi);
+      DWORD create_error = GetLastError();
+      if (si.lpAttributeList != nullptr) {
+        DeleteProcThreadAttributeList(si.lpAttributeList);
+      }
+      if (console != INVALID_HANDLE_VALUE) {
+        CloseHandle(console);  // the child has its own copy
+      }
+      if (!ok) {
+        BOOST_LOG(error) << "Extra screen "sv << child.screen << ": couldn't start ("sv << create_error << ')';
         return false;
       }
       AssignProcessToJobObject(g_job, pi.hProcess);  // ends together with this process

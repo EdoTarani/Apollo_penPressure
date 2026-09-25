@@ -67,14 +67,25 @@ namespace proc {
     VDISPLAY::closeVDisplayDevice();
   }
 
+  const char *vdisplay_status_name(VDISPLAY::DRIVER_STATUS status) {
+    switch (status) {
+      case VDISPLAY::DRIVER_STATUS::OK: return "ready";
+      case VDISPLAY::DRIVER_STATUS::FAILED: return "can't open the SudoVDA device";
+      case VDISPLAY::DRIVER_STATUS::VERSION_INCOMPATIBLE: return "SudoVDA driver version incompatible";
+      case VDISPLAY::DRIVER_STATUS::WATCHDOG_FAILED: return "SudoVDA watchdog failed";
+      default: return "unknown";
+    }
+  }
+
   void initVDisplayDriver() {
     vDisplayDriverStatus = VDISPLAY::openVDisplayDevice();
     if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
       if (!VDISPLAY::startPingThread(onVDisplayWatchdogFailed)) {
         onVDisplayWatchdogFailed();
-        return;
       }
     }
+    // The driver helpers only printf; make the outcome visible in the log
+    BOOST_LOG(info) << "Virtual display driver: "sv << vdisplay_status_name(vDisplayDriverStatus);
   }
 #endif
 
@@ -339,6 +350,8 @@ namespace proc {
         }
       } else {
         // Driver isn't working so we don't need to track virtual display.
+        BOOST_LOG(warning) << "No virtual display for this session (driver: "sv << vdisplay_status_name(vDisplayDriverStatus)
+                           << "); streaming an existing display instead"sv;
         launch_session->virtual_display = false;
       }
     }
