@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -810,36 +811,69 @@ namespace platf::virtual_tablet {
       return true;
     }
 
-    void attach_to_windows() {
-      // After an Apollo restart usbip-win2 may already be reconnecting on its own
-      std::this_thread::sleep_for(3s);
+    // The tablet is plugged into Windows only while a Moonlight stream runs, so at the office
+    // only the real tablet (or Parsec's) is there. One worker applies the latest wish.
+    std::mutex g_plug_mutex;
+    std::atomic<bool> g_want_plugged {false};
+
+    /// usbip-win2's port number for our tablet ("Port 01: ..." above our usbip:// line), or -1
+    int our_usbip_port(const std::string &port_output) {
+      std::string ours = "usbip://127.0.0.1:" + std::to_string(USBIP_TCP_PORT) + "/" + BUSID;
+      auto at = port_output.find(ours);
+      if (at == std::string::npos) {
+        return -1;
+      }
+      auto port = port_output.rfind("Port ", at);
+      if (port == std::string::npos) {
+        return -1;
+      }
+      return std::atoi(port_output.c_str() + port + 5);
+    }
+
+    void apply_plugged() {
+      std::lock_guard lg(g_plug_mutex);
+      bool want = g_want_plugged;
       if (g_stopping) {
         return;
       }
 
       std::string out;
       DWORD code = 0;
-      std::string ours = "usbip://127.0.0.1:" + std::to_string(USBIP_TCP_PORT) + "/" + BUSID;
       if (!run_usbip(L"port", out, code)) {
         BOOST_LOG(warning) << "Virtual tablet: usbip-win2 not found ("sv << "C:\\Program Files\\USBip\\usbip.exe"sv
                            << "); install it from https://github.com/vadimgrn/usbip-win2 so Windows can see the tablet"sv;
         return;
       }
-      if (out.find(ours) != std::string::npos) {
-        BOOST_LOG(info) << "Virtual tablet: already plugged in"sv;
-        return;
-      }
+      int port = our_usbip_port(out);
 
-      out.clear();
-      auto args = L"-t " + std::to_wstring(USBIP_TCP_PORT) + L" attach -r 127.0.0.1 -b " + std::wstring(BUSID, BUSID + std::strlen(BUSID));
-      run_usbip(args, out, code);
-      if (code == 0) {
-        BOOST_LOG(info) << "Virtual tablet: plugged in via usbip-win2"sv;
-      } else {
-        BOOST_LOG(warning) << "Virtual tablet: usbip attach failed ("sv << code << "): "sv << out;
+      if (want && port < 0) {
+        out.clear();
+        auto args = L"-t " + std::to_wstring(USBIP_TCP_PORT) + L" attach -r 127.0.0.1 -b " + std::wstring(BUSID, BUSID + std::strlen(BUSID));
+        run_usbip(args, out, code);
+        if (code == 0) {
+          BOOST_LOG(info) << "Virtual tablet: plugged in via usbip-win2"sv;
+        } else {
+          BOOST_LOG(warning) << "Virtual tablet: usbip attach failed ("sv << code << "): "sv << out;
+        }
+      } else if (!want && port >= 0) {
+        out.clear();
+        run_usbip(L"detach -p " + std::to_wstring(port), out, code);
+        if (code == 0) {
+          BOOST_LOG(info) << "Virtual tablet: unplugged (no stream)"sv;
+        } else {
+          BOOST_LOG(warning) << "Virtual tablet: usbip detach failed ("sv << code << "): "sv << out;
+        }
       }
     }
   }  // namespace
+
+  void set_plugged(bool plugged) {
+    if (!g_running) {
+      return;  // the tablet lives in the main instance
+    }
+    g_want_plugged = plugged;
+    std::thread(apply_plugged).detach();
+  }
 
   void start() {
     if (g_running.exchange(true)) {
@@ -885,7 +919,9 @@ namespace platf::virtual_tablet {
     }
 
     BOOST_LOG(info) << "Virtual tablet: serving Wacom Cintiq 22 on 127.0.0.1:"sv << USBIP_TCP_PORT;
-    std::thread(attach_to_windows).detach();
+    // Unplugged until a stream starts (also removes one left plugged in by a previous run)
+    g_want_plugged = false;
+    std::thread(apply_plugged).detach();
   }
 
   void stop() {

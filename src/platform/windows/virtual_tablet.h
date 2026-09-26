@@ -28,6 +28,12 @@ namespace platf::virtual_tablet {
   bool running();
 
   /**
+   * @brief Plug the tablet into Windows (a stream started) or unplug it (the last client left),
+   * in the background. Does nothing in an instance that doesn't serve the tablet.
+   */
+  void set_plugged(bool plugged);
+
+  /**
    * @brief Feed a pen event.
    * @param pen The pen event from the client.
    * @param x Horizontal position on the tablet area, 0..1.

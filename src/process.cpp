@@ -40,6 +40,7 @@
 #ifdef _WIN32
   // from_utf8() string conversion function
   #include "platform/windows/misc.h"
+  #include "platform/windows/virtual_tablet.h"
   #include "platform/windows/utils.h"
 
   // _SH constants for _wfsopen()
@@ -662,6 +663,11 @@ namespace proc {
   void proc_t::resume() {
     BOOST_LOG(info) << "Session resuming for app [" << _app_name << "].";
 
+#ifdef _WIN32
+    // A stream runs: plug the virtual Wacom in (main instance only)
+    platf::virtual_tablet::set_plugged(true);
+#endif
+
     if (!_app.state_cmds.empty()) {
       auto exec_thread = std::thread([cmd_list = _app.state_cmds, app_working_dir = _app.working_dir, _env = _env]() mutable {
 
@@ -704,6 +710,11 @@ namespace proc {
   }
 
   void proc_t::pause() {
+#ifdef _WIN32
+    // All clients left: unplug the virtual Wacom, so the office tablet (or Parsec's) is alone
+    platf::virtual_tablet::set_plugged(false);
+#endif
+
     if (!running()) {
       BOOST_LOG(info) << "Session already stopped, do not run pause commands.";
       return;
