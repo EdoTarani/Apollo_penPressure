@@ -17,6 +17,7 @@
 // standard includes
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -310,6 +311,40 @@ namespace platf::virtual_tablet {
     }
 
     /// Queue the current pen state as an interrupt report (caller holds g_mutex)
+    // Pen statistics, logged every 2 s while the pen is active ("Virtual tablet: pen ..."):
+    // how often and how evenly pen events arrive from the client, and how often the host fell
+    // behind (merged). Guarded by g_mutex.
+    struct {
+      std::chrono::steady_clock::time_point window_start {};
+      std::chrono::steady_clock::time_point last_event {};
+      int64_t max_gap_ms = 0;
+      uint32_t events = 0, merged = 0, delivered = 0;
+    } g_stats;
+
+    void count_event_locked() {
+      auto now = std::chrono::steady_clock::now();
+      if (g_stats.last_event.time_since_epoch().count() != 0) {
+        auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_stats.last_event).count();
+        if (gap < 500) {
+          g_stats.max_gap_ms = std::max<int64_t>(g_stats.max_gap_ms, gap);
+        }
+      }
+      g_stats.last_event = now;
+      g_stats.events++;
+      if (g_stats.window_start.time_since_epoch().count() == 0) {
+        g_stats.window_start = now;
+        return;
+      }
+
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_stats.window_start).count();
+      if (elapsed >= 2000) {
+        BOOST_LOG(info) << "Virtual tablet: pen "sv << g_stats.events * 1000 / elapsed << " events/s, max gap "sv
+                        << g_stats.max_gap_ms << " ms, "sv << g_stats.delivered * 1000 / elapsed << " reports/s to the driver, "sv
+                        << g_stats.merged << " merged (host behind)"sv;
+        g_stats = {};
+      }
+    }
+
     void queue_report_locked() {
       auto report = g_data_mode == 2 ? g_pen.report10() : g_pen.report06();
 
@@ -321,6 +356,7 @@ namespace platf::virtual_tablet {
         auto &last = g_reports.back();
         if (last.size() == report.size() && last.size() > 1 && last[0] == report[0] && last[1] == report[1]) {
           last = std::move(report);
+          g_stats.merged++;
           g_cv.notify_all();
           return;
         }
@@ -535,6 +571,7 @@ namespace platf::virtual_tablet {
           s->pending_in.pop_front();
           report = std::move(g_reports.front());
           g_reports.pop_front();
+          g_stats.delivered++;
         }
         if (report.size() > urb.buflen) {
           report.resize(urb.buflen);
@@ -887,5 +924,6 @@ namespace platf::virtual_tablet {
     std::lock_guard lg(g_mutex);
     g_pen.apply(pen, x, y);
     queue_report_locked();
+    count_event_locked();
   }
 }  // namespace platf::virtual_tablet
