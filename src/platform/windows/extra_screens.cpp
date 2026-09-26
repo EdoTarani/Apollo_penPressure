@@ -43,7 +43,7 @@ namespace platf::extra_screens {
     const std::set<std::string> own_keys {
       "port", "sunshine_name", "file_state", "credentials_file", "paired_devices_file", "extra_screen_index", "vdisplay_broker", "log_path",
       "output_name", "headless_mode", "stream_audio", "system_tray", "extra_screens",
-      "pen_virtual_tablet_host", "pen_virtual_tablet_desktop",
+      "pen_virtual_tablet", "pen_virtual_tablet_host", "pen_virtual_tablet_desktop",
     };
 
     /// The virtual display broker's pipe (see VDISPLAY::startDisplayBroker), unique per main port
@@ -141,8 +141,10 @@ namespace platf::extra_screens {
       out << "stream_audio = disabled\n";  // only the main screen plays sound
       out << "system_tray = disabled\n";
       out << "extra_screens = 0\n";
-      out << "pen_virtual_tablet_host = disabled\n";  // forward to the main instance's tablet
-      out << "pen_virtual_tablet_desktop = enabled\n";
+      // The virtual Cintiq is a pen display: Wacom ties it to one monitor, screen 1's. The extra
+      // screens use a Windows Ink pen (pressure, eraser) instead.
+      out << "pen_virtual_tablet = disabled\n";
+      out << "pen_virtual_tablet_host = disabled\n";
 
       auto path = dir / ("sunshine_" + suffix + ".conf");
       std::ofstream(path, std::ios::trunc) << out.str();
@@ -308,8 +310,9 @@ namespace platf::extra_screens {
     VDISPLAY::startDisplayBroker(platf::from_utf8(broker_pipe_utf8()),
                                  config::nvhttp.extra_screens_arrange && !config::video.isolated_virtual_display_option);
 
-    // With several screens, one virtual tablet spans them all
-    config::input.pen_virtual_tablet_desktop = true;
+    // The virtual Cintiq covers screen 1 only (Wacom maps a pen display to one monitor):
+    // positions relative to screen 1, not the whole desktop
+    config::input.pen_virtual_tablet_desktop = false;
 
     g_job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits {};
