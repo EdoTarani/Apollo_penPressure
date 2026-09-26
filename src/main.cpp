@@ -345,6 +345,13 @@ int main(int argc, char *argv[]) {
 
   proc::refresh(config::stream.file_apps);
 
+#ifdef _WIN32
+  // If a previous run left the physical monitors off (e.g. it crashed while streaming), switch them on
+  if (config::nvhttp.extra_screen_index == 0) {
+    VDISPLAY::ensurePhysicalDisplaysOn();
+  }
+#endif
+
   // If any of the following fail, we log an error and continue event though sunshine will not function correctly.
   // This allows access to the UI to fix configuration problems or view the logs.
 

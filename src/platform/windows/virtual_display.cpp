@@ -6,6 +6,9 @@
 #include <combaseapi.h>
 #include <thread>
 #include <algorithm>
+#include <climits>
+#include <map>
+#include <mutex>
 
 #include <wrl/client.h>
 #include <dxgi.h>
@@ -30,6 +33,56 @@ HANDLE SUDOVDA_DRIVER_HANDLE = INVALID_HANDLE_VALUE;
 
 namespace {
 	std::wstring g_brokerPipe;  // non-empty: this process is a broker client (an extra screen)
+
+	// Displays this process created, by GUID: creating one again returns it (the main instance
+	// creates the extra screens' displays up front; their own requests then just find them)
+	std::mutex g_createdMutex;
+	std::map<std::string, std::wstring> g_created;
+
+	std::string guidKey(const GUID& guid) {
+		return std::string(reinterpret_cast<const char*>(&guid), sizeof(GUID));
+	}
+
+	bool g_physicalDisabled = false;
+
+	// The physical monitors' exact layout before they were switched off, to put back
+	std::vector<DISPLAYCONFIG_PATH_INFO> g_savedPaths;
+	std::vector<DISPLAYCONFIG_MODE_INFO> g_savedModes;
+
+	bool isSudoAdapter(const wchar_t* gdiName) {
+		DISPLAY_DEVICEW adapter {};
+		adapter.cb = sizeof(adapter);
+		for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); i++, adapter.cb = sizeof(adapter)) {
+			if (_wcsicmp(adapter.DeviceName, gdiName) == 0) {
+				return wcsstr(adapter.DeviceString, L"Sudo") != nullptr;
+			}
+		}
+		return false;
+	}
+
+	bool isSudoPath(const DISPLAYCONFIG_PATH_INFO& path) {
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
+		source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+		source.header.size = sizeof(source);
+		source.header.adapterId = path.sourceInfo.adapterId;
+		source.header.id = path.sourceInfo.id;
+		return DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS && isSudoAdapter(source.viewGdiDeviceName);
+	}
+
+	bool activePaths(std::vector<DISPLAYCONFIG_PATH_INFO>& paths, std::vector<DISPLAYCONFIG_MODE_INFO>& modes) {
+		UINT32 pathCount = 0, modeCount = 0;
+		if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) {
+			return false;
+		}
+		paths.resize(pathCount);
+		modes.resize(modeCount);
+		if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) != ERROR_SUCCESS) {
+			return false;
+		}
+		paths.resize(pathCount);
+		modes.resize(modeCount);
+		return true;
+	}
 
 	enum : uint32_t { BROKER_ADD = 1, BROKER_REMOVE = 2 };
 
@@ -95,6 +148,111 @@ bool arrangeInRow(const wchar_t* deviceName, int slot) {
 	}
 	wprintf(L"[SUDOVDA] Placed %ls at x=%ld (slot %d): %ld\n", deviceName, mode.dmPosition.x, slot, result);
 	return result == DISP_CHANGE_SUCCESSFUL;
+}
+
+void removeAllVirtualDisplays() {
+	std::vector<std::string> keys;
+	{
+		std::lock_guard lock(g_createdMutex);
+		for (auto& [key, name] : g_created) {
+			keys.push_back(key);
+		}
+	}
+	for (auto& key : keys) {
+		GUID guid;
+		memcpy(&guid, key.data(), sizeof(GUID));
+		removeVirtualDisplay(guid);
+	}
+}
+
+bool keepOnlyVirtualDisplays() {
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+	if (!activePaths(paths, modes)) {
+		return false;
+	}
+
+	// Supply only the virtual displays' paths (and their modes): the others go off.
+	// Remember the others (the monitors' positions haven't changed) to put them back later.
+	std::vector<DISPLAYCONFIG_PATH_INFO> keep, saved;
+	std::vector<DISPLAYCONFIG_MODE_INFO> keepModes, savedModes;
+	auto copyMode = [&](std::vector<DISPLAYCONFIG_MODE_INFO>& to, UINT32& idx) {
+		if (idx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && idx < modes.size()) {
+			to.push_back(modes[idx]);
+			idx = (UINT32) to.size() - 1;
+		}
+	};
+	for (auto path : paths) {
+		bool isVirtual = isSudoPath(path);
+		auto& to = isVirtual ? keepModes : savedModes;
+		copyMode(to, path.sourceInfo.modeInfoIdx);
+		copyMode(to, path.targetInfo.modeInfoIdx);
+		(isVirtual ? keep : saved).push_back(path);
+	}
+	if (keep.empty() || keep.size() == paths.size()) {
+		return false;  // never switch every display off; or nothing to switch off
+	}
+
+	// The primary display must sit at 0,0: move the leftmost virtual display there
+	LONG minX = LONG_MAX, minY = 0;
+	for (auto& mode : keepModes) {
+		if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE && mode.sourceMode.position.x < minX) {
+			minX = mode.sourceMode.position.x;
+			minY = mode.sourceMode.position.y;
+		}
+	}
+	for (auto& mode : keepModes) {
+		if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+			mode.sourceMode.position.x -= minX;
+			mode.sourceMode.position.y -= minY;
+		}
+	}
+
+	LONG result = SetDisplayConfig((UINT32) keep.size(), keep.data(), (UINT32) keepModes.size(), keepModes.data(),
+		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
+	printf("[SUDOVDA] Physical displays off (%zu virtual kept): %ld\n", keep.size(), result);
+	if (result == ERROR_SUCCESS) {
+		g_physicalDisabled = true;
+		g_savedPaths = std::move(saved);
+		g_savedModes = std::move(savedModes);
+	}
+	return result == ERROR_SUCCESS;
+}
+
+void restorePhysicalDisplays() {
+	if (!g_physicalDisabled) {
+		return;
+	}
+	g_physicalDisabled = false;
+
+	// Exactly the layout from before (the virtual displays are gone by now); if that no
+	// longer fits (e.g. a monitor was unplugged), the user's usual extended layout
+	LONG result = ERROR_INVALID_PARAMETER;
+	if (!g_savedPaths.empty()) {
+		result = SetDisplayConfig((UINT32) g_savedPaths.size(), g_savedPaths.data(), (UINT32) g_savedModes.size(), g_savedModes.data(),
+			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
+	}
+	if (result != ERROR_SUCCESS) {
+		result = SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+	}
+	g_savedPaths.clear();
+	g_savedModes.clear();
+	printf("[SUDOVDA] Physical displays back on: %ld\n", result);
+}
+
+void ensurePhysicalDisplaysOn() {
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+	if (!activePaths(paths, modes)) {
+		return;
+	}
+	for (auto& path : paths) {
+		if (!isSudoPath(path)) {
+			return;  // a physical display is on
+		}
+	}
+	LONG result = SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+	printf("[SUDOVDA] No physical display was on, switched them on: %ld\n", result);
 }
 
 void startDisplayBroker(const std::wstring& pipeName) {
@@ -812,6 +970,15 @@ std::wstring createVirtualDisplay(
 		return std::wstring();
 	}
 
+	{
+		std::lock_guard lock(g_createdMutex);
+		auto existing = g_created.find(guidKey(guid));
+		if (existing != g_created.end()) {
+			wprintf(L"[SUDOVDA] Virtual display already there: %ls\n", existing->second.c_str());
+			return existing->second;
+		}
+	}
+
 	VIRTUAL_DISPLAY_ADD_OUT output;
 	if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
 		printf("[SUDOVDA] Failed to add virtual display.\n");
@@ -832,6 +999,11 @@ std::wstring createVirtualDisplay(
 	wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", deviceName);
 	printf("[SUDOVDA] Configuration: W: %d, H: %d, FPS: %d\n", width, height, fps);
 
+	{
+		std::lock_guard lock(g_createdMutex);
+		g_created[guidKey(guid)] = deviceName;
+	}
+
 	return std::wstring(deviceName);
 }
 
@@ -846,6 +1018,11 @@ bool removeVirtualDisplay(const GUID& guid) {
 
 	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
 		return false;
+	}
+
+	{
+		std::lock_guard lock(g_createdMutex);
+		g_created.erase(guidKey(guid));
 	}
 
 	if (RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid)) {

@@ -55,5 +55,16 @@ namespace VDISPLAY {
 	// (physical) displays, all at the top edge; slots are the display's own width apart
 	bool arrangeInRow(const wchar_t* deviceName, int slot);
 
+	// Remove every virtual display this process created (the extra screens' too)
+	void removeAllVirtualDisplays();
+
+	// Switch off every display that isn't a SudoVDA virtual display (never all of them);
+	// restorePhysicalDisplays() switches them back on in the user's usual layout
+	bool keepOnlyVirtualDisplays();
+	void restorePhysicalDisplays();
+
+	// At startup: if no physical display is on (e.g. left off by a crash), switch them on
+	void ensurePhysicalDisplaysOn();
+
 	std::vector<std::wstring> matchDisplay(std::wstring sMatch);
 }

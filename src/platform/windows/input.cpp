@@ -613,7 +613,47 @@ namespace platf {
     send_input(i);
   }
 
+  /**
+   * Ctrl+Alt+Del can't be simulated with SendInput: ask Windows for the secure attention
+   * sequence instead. That needs the policy that lets services (we run as SYSTEM) send it.
+   */
+  void send_secure_attention() {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", 0, nullptr, 0,
+                        KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+      DWORD value = 0, size = sizeof(value);
+      if (RegQueryValueExW(key, L"SoftwareSASGeneration", nullptr, nullptr, (LPBYTE) &value, &size) != ERROR_SUCCESS || !(value & 1)) {
+        DWORD allow = value | 1;  // 1 = services (keeps Ease of Access apps if they were allowed)
+        RegSetValueExW(key, L"SoftwareSASGeneration", 0, REG_DWORD, (const BYTE *) &allow, sizeof(allow));
+        BOOST_LOG(info) << "Ctrl+Alt+Del: allowed services to send it (policy SoftwareSASGeneration = "sv << allow << ')';
+      }
+      RegCloseKey(key);
+    }
+
+    static auto send_sas = (void(WINAPI *)(BOOL)) GetProcAddress(LoadLibraryW(L"sas.dll"), "SendSAS");
+    if (send_sas) {
+      send_sas(FALSE);
+      BOOST_LOG(info) << "Ctrl+Alt+Del sent"sv;
+    } else {
+      BOOST_LOG(warning) << "Ctrl+Alt+Del: SendSAS isn't available"sv;
+    }
+  }
+
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
+    // Ctrl+Alt+Del from the client: the secure attention sequence
+    {
+      static bool ctrl = false, alt = false;
+      auto vk = modcode & 0xFF;
+      if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL) {
+        ctrl = !release;
+      } else if (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) {
+        alt = !release;
+      } else if (vk == VK_DELETE && !release && ctrl && alt) {
+        send_secure_attention();
+        return;
+      }
+    }
+
     INPUT i {};
     i.type = INPUT_KEYBOARD;
     auto &ki = i.ki;

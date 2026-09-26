@@ -172,6 +172,15 @@ const validateFallbackMode = (event) => {
               v-if="platform === 'windows' && config.extra_screens > 0"
     ></Checkbox>
 
+    <!-- Physical monitors off while streaming virtual displays -->
+    <Checkbox class="mb-3"
+              id="disable_physical_displays"
+              locale-prefix="config"
+              v-model="config.disable_physical_displays"
+              default="true"
+              v-if="platform === 'windows'"
+    ></Checkbox>
+
     <!-- Double Refreshrate -->
     <Checkbox class="mb-3"
               id="double_refreshrate"

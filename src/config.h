@@ -195,6 +195,7 @@ namespace config {
     int extra_screen_index;  ///< Companion instances: which extra screen this is (2, 3); 0 for the main instance
     std::string vdisplay_broker;  ///< Companion instances: the main instance's virtual display broker pipe
     bool extra_screens_arrange;  ///< Place the screens' virtual displays side by side (off: Windows keeps the user's layout)
+    bool disable_physical_displays;  ///< While streaming virtual displays, switch the physical monitors off
   };
 
   struct input_t {

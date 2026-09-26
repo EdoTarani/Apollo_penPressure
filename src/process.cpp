@@ -346,6 +346,41 @@ namespace proc {
             }
           }
 
+          if (config::nvhttp.extra_screen_index == 0) {
+            // Create the extra screens' displays now, before anything streams: adding displays
+            // later renumbers Windows' displays under a running capture. Each extra screen
+            // computes the same GUID and gets its display back from us through the broker.
+            for (int screen = 2; screen <= config::nvhttp.extra_screens + 1; ++screen) {
+              auto screen_uuid = device_uuid;
+              screen_uuid.b64[1] ^= 0x5343524545000000ull | (uint64_t) screen;
+              screen_uuid.b64[0] ^= 0x53430000ull | (uint64_t) screen;
+              GUID screen_guid;
+              memcpy(&screen_guid, &screen_uuid, sizeof(GUID));
+              auto screen_name = device_name + " Screen " + std::to_string(screen);
+
+              auto screen_display = VDISPLAY::createVirtualDisplay(screen_uuid.string().c_str(), screen_name.c_str(),
+                                                                   render_width, render_height, target_fps, screen_guid);
+              if (screen_display.empty()) {
+                BOOST_LOG(warning) << "Couldn't create the virtual display for screen "sv << screen;
+                continue;
+              }
+              BOOST_LOG(info) << "Virtual Display for screen "sv << screen << " created at "sv << platf::to_utf8(screen_display);
+              if (launch_session->width && launch_session->height && launch_session->fps) {
+                VDISPLAY::changeDisplaySettings(screen_display.c_str(), render_width, render_height, target_fps);
+              }
+              if (config::nvhttp.extra_screens_arrange && !config::video.isolated_virtual_display_option) {
+                VDISPLAY::arrangeInRow(screen_display.c_str(), screen - 1);
+              }
+            }
+
+            // Only the virtual displays stay on while streaming
+            if (config::nvhttp.disable_physical_displays) {
+              if (VDISPLAY::keepOnlyVirtualDisplays()) {
+                BOOST_LOG(info) << "Physical displays switched off while streaming"sv;
+              }
+            }
+          }
+
           // Set virtual_display to true when everything went fine
           this->virtual_display = true;
           this->display_name = platf::to_utf8(vdisplayName);
@@ -689,6 +724,18 @@ namespace proc {
       return;
     }
 
+#ifdef _WIN32
+    // Home/office: with virtual screens, closing Moonlight removes them and puts the office
+    // monitors back exactly as they were. (An extra screen ends too, so its next connection
+    // launches again and gets its display.)
+    if (this->virtual_display &&
+        (config::nvhttp.extra_screen_index > 0 || config::nvhttp.extra_screens > 0 || config::nvhttp.disable_physical_displays)) {
+      BOOST_LOG(info) << "All clients disconnected: ending [" << _app_name << "] to remove the virtual displays and restore the monitors";
+      terminate();
+      return;
+    }
+#endif
+
     BOOST_LOG(info) << "Session pausing for app [" << _app_name << "].";
 
     if (!_app.state_cmds.empty()) {
@@ -796,6 +843,12 @@ namespace proc {
         BOOST_LOG(warning) << "Virtual Display remove failed";
       } else {
         BOOST_LOG(warning) << "Virtual Display remove failed, but it seems it was not created correctly either.";
+      }
+
+      if (config::nvhttp.extra_screen_index == 0) {
+        // The extra screens' displays we created up front, then the physical monitors back on
+        VDISPLAY::removeAllVirtualDisplays();
+        VDISPLAY::restorePhysicalDisplays();
       }
     }
 
