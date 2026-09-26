@@ -186,14 +186,16 @@ const config = ref(props.config)
               default="false"
     ></Checkbox>
 
-    <!-- One virtual tablet across all screens -->
-    <Checkbox v-if="platform === 'windows' && config.mouse === 'enabled' && config.native_pen_touch === 'enabled' && config.pen_virtual_tablet === 'enabled'"
-              class="mb-3"
-              id="pen_virtual_tablet_desktop"
-              locale-prefix="config"
-              v-model="config.pen_virtual_tablet_desktop"
-              default="false"
-    ></Checkbox>
+    <!-- With extra screens: which screen gets the virtual Wacom -->
+    <div class="mb-3" v-if="platform === 'windows' && config.pen_virtual_tablet === 'enabled' && config.extra_screens > 0">
+      <label for="pen_virtual_tablet_screen" class="form-label">{{ $t('config.pen_virtual_tablet_screen') }}</label>
+      <select id="pen_virtual_tablet_screen" class="form-select" v-model="config.pen_virtual_tablet_screen">
+        <option value="1">Screen 1</option>
+        <option value="2">Screen 2</option>
+        <option value="3" v-if="config.extra_screens > 1">Screen 3</option>
+      </select>
+      <div class="form-text">{{ $t('config.pen_virtual_tablet_screen_desc') }}</div>
+    </div>
 
     <!-- Enable Input Only Mode -->
     <hr>

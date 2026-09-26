@@ -1153,10 +1153,23 @@ namespace platf {
    * @param touch_port The current viewport for translating to screen coordinates.
    * @param pen The pen event.
    */
+  /**
+   * With extra screens, only the chosen screen's pen goes to the virtual Cintiq: Wacom ties a
+   * pen display to one monitor. The other screens use the Windows Ink pen.
+   */
+  static bool pen_goes_to_virtual_tablet() {
+    int screen = config::nvhttp.extra_screen_index > 0 ? config::nvhttp.extra_screen_index : 1;
+    int chosen = config::input.pen_virtual_tablet_screen;
+    if (config::nvhttp.extra_screen_index == 0 && chosen > config::nvhttp.extra_screens + 1) {
+      chosen = 1;  // no such screen right now
+    }
+    return screen == chosen;
+  }
+
   void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen) {
     auto raw = (client_input_raw_t *) input;
 
-    if (config::input.pen_virtual_tablet) {
+    if (config::input.pen_virtual_tablet && pen_goes_to_virtual_tablet()) {
       forward_pen_to_virtual_tablet(touch_port, pen);
       return;
     }

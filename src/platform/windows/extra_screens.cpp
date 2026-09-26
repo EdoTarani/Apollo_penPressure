@@ -43,7 +43,7 @@ namespace platf::extra_screens {
     const std::set<std::string> own_keys {
       "port", "sunshine_name", "file_state", "credentials_file", "paired_devices_file", "extra_screen_index", "vdisplay_broker", "log_path",
       "output_name", "headless_mode", "stream_audio", "system_tray", "extra_screens",
-      "pen_virtual_tablet", "pen_virtual_tablet_host", "pen_virtual_tablet_desktop",
+      "pen_virtual_tablet", "pen_virtual_tablet_host", "pen_virtual_tablet_desktop", "pen_virtual_tablet_screen",
     };
 
     /// The virtual display broker's pipe (see VDISPLAY::startDisplayBroker), unique per main port
@@ -141,10 +141,14 @@ namespace platf::extra_screens {
       out << "stream_audio = disabled\n";  // only the main screen plays sound
       out << "system_tray = disabled\n";
       out << "extra_screens = 0\n";
-      // The virtual Cintiq is a pen display: Wacom ties it to one monitor, screen 1's. The extra
-      // screens use a Windows Ink pen (pressure, eraser) instead.
-      out << "pen_virtual_tablet = disabled\n";
+      // The virtual Cintiq is a pen display: Wacom ties it to one monitor, the chosen screen's.
+      // That screen forwards its pen to our tablet (positions relative to its own display); the
+      // others use a Windows Ink pen.
+      int tablet_screen = config::input.pen_virtual_tablet_screen <= config::nvhttp.extra_screens + 1 ? config::input.pen_virtual_tablet_screen : 1;
+      out << "pen_virtual_tablet = " << (config::input.pen_virtual_tablet ? "enabled" : "disabled") << '\n';
       out << "pen_virtual_tablet_host = disabled\n";
+      out << "pen_virtual_tablet_desktop = disabled\n";
+      out << "pen_virtual_tablet_screen = " << tablet_screen << '\n';
 
       auto path = dir / ("sunshine_" + suffix + ".conf");
       std::ofstream(path, std::ios::trunc) << out.str();

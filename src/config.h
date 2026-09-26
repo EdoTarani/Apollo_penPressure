@@ -223,6 +223,7 @@ namespace config {
     int pen_virtual_tablet_port;
     bool pen_virtual_tablet_desktop;  ///< Send positions relative to the whole desktop (one tablet for all screens)
     bool pen_virtual_tablet_host;  ///< This instance serves the built-in tablet (false: forward to the one that does)
+    int pen_virtual_tablet_screen;  ///< With extra screens: the screen (1..3) whose pen goes to the virtual tablet; the others use Windows Ink
 
     bool enable_input_only_mode;
     bool forward_rumble;
