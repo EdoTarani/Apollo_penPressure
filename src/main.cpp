@@ -174,6 +174,15 @@ int main(int argc, char *argv[]) {
   // the version should be printed to the log before anything else
   BOOST_LOG(info) << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
 
+#ifdef _WIN32
+  // An extra screen: the main instance owns the virtual display driver (it takes one handle
+  // at a time), so create and remove our display through its broker
+  if (!config::nvhttp.vdisplay_broker.empty()) {
+    VDISPLAY::useDisplayBroker(platf::from_utf8(config::nvhttp.vdisplay_broker));
+    BOOST_LOG(info) << "Virtual displays via the main instance: "sv << config::nvhttp.vdisplay_broker;
+  }
+#endif
+
   // Log publisher metadata
   log_publisher_data();
 

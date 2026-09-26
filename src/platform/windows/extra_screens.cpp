@@ -18,6 +18,7 @@
 // local includes
 #include "extra_screens.h"
 #include "misc.h"
+#include "virtual_display.h"
 #include "src/config.h"
 #include "src/logging.h"
 
@@ -40,10 +41,15 @@ namespace platf::extra_screens {
 
     /// Keys an extra screen must not inherit from the main configuration
     const std::set<std::string> own_keys {
-      "port", "sunshine_name", "file_state", "credentials_file", "paired_devices_file", "extra_screen_index", "log_path",
+      "port", "sunshine_name", "file_state", "credentials_file", "paired_devices_file", "extra_screen_index", "vdisplay_broker", "log_path",
       "output_name", "headless_mode", "stream_audio", "system_tray", "extra_screens",
       "pen_virtual_tablet_host", "pen_virtual_tablet_desktop",
     };
+
+    /// The virtual display broker's pipe (see VDISPLAY::startDisplayBroker), unique per main port
+    std::string broker_pipe_utf8() {
+      return R"(\\.\pipe\ApolloVDisplay-)" + std::to_string(config::sunshine.port);
+    }
 
     std::string trim(const std::string &s) {
       auto b = s.find_first_not_of(" \t\r\n");
@@ -75,6 +81,7 @@ namespace platf::extra_screens {
       out << "credentials_file = " << fs::absolute(config::sunshine.credentials_file).string() << '\n';
       out << "paired_devices_file = " << fs::absolute(config::nvhttp.file_state).string() << '\n';
       out << "extra_screen_index = " << screen << '\n';  // its own virtual display, not the main one's
+      out << "vdisplay_broker = " << broker_pipe_utf8() << '\n';  // displays through our driver handle
       out << "log_path = " << (dir / ("sunshine_" + suffix + ".log")).string() << '\n';
       out << "headless_mode = enabled\n";  // always its own virtual display
       out << "stream_audio = disabled\n";  // only the main screen plays sound
@@ -237,6 +244,9 @@ namespace platf::extra_screens {
     if (count <= 0) {
       return;
     }
+
+    // SudoVDA takes one handle at a time and we hold it: serve the extra screens' display requests
+    VDISPLAY::startDisplayBroker(platf::from_utf8(broker_pipe_utf8()));
 
     // With several screens, one virtual tablet spans them all
     config::input.pen_virtual_tablet_desktop = true;

@@ -22,6 +22,88 @@ namespace VDISPLAY {
 
 HANDLE SUDOVDA_DRIVER_HANDLE = INVALID_HANDLE_VALUE;
 
+// ---- Display broker ----
+// SudoVDA accepts one open handle at a time, so only one Apollo process can talk to it. With
+// extra screens, the main instance keeps the driver and serves add/remove requests over a local
+// named pipe; the extra screens' processes create and remove their displays through it.
+
+namespace {
+	std::wstring g_brokerPipe;  // non-empty: this process is a broker client (an extra screen)
+
+	enum : uint32_t { BROKER_ADD = 1, BROKER_REMOVE = 2 };
+
+	struct BrokerRequest {
+		uint32_t op;
+		GUID guid;
+		uint32_t width, height, fps;
+		char clientUid[128];
+		char clientName[128];
+	};
+
+	struct BrokerReply {
+		uint32_t ok;
+		wchar_t deviceName[CCHDEVICENAME];
+	};
+
+	bool brokerCall(BrokerRequest& request, BrokerReply& reply) {
+		DWORD read = 0;
+		// Connect, send, receive, disconnect; waits up to 10 s for a free pipe instance
+		if (!CallNamedPipeW(g_brokerPipe.c_str(), &request, sizeof(request), &reply, sizeof(reply), &read, 10000)) {
+			printf("[SUDOVDA] Display broker unreachable (%lu)\n", GetLastError());
+			return false;
+		}
+		return read == sizeof(reply) && reply.ok;
+	}
+}
+
+void useDisplayBroker(const std::wstring& pipeName) {
+	g_brokerPipe = pipeName;
+}
+
+bool isDisplayBrokerClient() {
+	return !g_brokerPipe.empty();
+}
+
+void startDisplayBroker(const std::wstring& pipeName) {
+	std::thread([pipeName] {
+		for (;;) {
+			// Local clients only; SYSTEM/admins may write (default pipe security)
+			HANDLE pipe = CreateNamedPipeW(pipeName.c_str(), PIPE_ACCESS_DUPLEX,
+				PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+				PIPE_UNLIMITED_INSTANCES, sizeof(BrokerReply), sizeof(BrokerRequest), 0, nullptr);
+			if (pipe == INVALID_HANDLE_VALUE) {
+				printf("[SUDOVDA] Display broker: can't create pipe (%lu)\n", GetLastError());
+				Sleep(5000);
+				continue;
+			}
+
+			if (ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) {
+				BrokerRequest request {};
+				BrokerReply reply {};
+				DWORD read = 0, written = 0;
+				if (ReadFile(pipe, &request, sizeof(request), &read, nullptr) && read == sizeof(request)) {
+					request.clientUid[sizeof(request.clientUid) - 1] = 0;
+					request.clientName[sizeof(request.clientName) - 1] = 0;
+					if (request.op == BROKER_ADD) {
+						auto name = createVirtualDisplay(request.clientUid, request.clientName,
+							request.width, request.height, request.fps, request.guid);
+						if (!name.empty() && name.size() < CCHDEVICENAME) {
+							wcscpy_s(reply.deviceName, name.c_str());
+							reply.ok = 1;
+						}
+					} else if (request.op == BROKER_REMOVE) {
+						reply.ok = removeVirtualDisplay(request.guid) ? 1 : 0;
+					}
+					WriteFile(pipe, &reply, sizeof(reply), &written, nullptr);
+					FlushFileBuffers(pipe);
+				}
+				DisconnectNamedPipe(pipe);
+			}
+			CloseHandle(pipe);
+		}
+	}).detach();
+}
+
 // START ISOLATED DISPLAY DECLARATIONS
 struct positionwidthheight;
 struct coordinates;
@@ -550,6 +632,9 @@ bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor) {
 }
 
 void closeVDisplayDevice() {
+	if (isDisplayBrokerClient()) {
+		return;
+	}
 	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
 		return;
 	}
@@ -560,6 +645,11 @@ void closeVDisplayDevice() {
 }
 
 DRIVER_STATUS openVDisplayDevice() {
+	if (isDisplayBrokerClient()) {
+		// The main instance owns the driver; requests go through its broker
+		return DRIVER_STATUS::OK;
+	}
+
 	uint32_t retryInterval = 20;
 	while (true) {
 		SUDOVDA_DRIVER_HANDLE = OpenDevice(&SUVDA_INTERFACE_GUID);
@@ -586,6 +676,9 @@ DRIVER_STATUS openVDisplayDevice() {
 }
 
 bool startPingThread(std::function<void()> failCb) {
+	if (isDisplayBrokerClient()) {
+		return true;  // the main instance keeps the driver's watchdog fed
+	}
 	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
 		return false;
 	}
@@ -622,6 +715,9 @@ bool startPingThread(std::function<void()> failCb) {
 }
 
 bool setRenderAdapterByName(const std::wstring& adapterName) {
+	if (isDisplayBrokerClient()) {
+		return true;  // the main instance's render adapter setting applies
+	}
 	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
 		return false;
 	}
@@ -661,6 +757,24 @@ std::wstring createVirtualDisplay(
 	uint32_t fps,
 	const GUID& guid
 ) {
+	if (isDisplayBrokerClient()) {
+		BrokerRequest request {};
+		BrokerReply reply {};
+		request.op = BROKER_ADD;
+		request.guid = guid;
+		request.width = width;
+		request.height = height;
+		request.fps = fps;
+		strncpy_s(request.clientUid, s_client_uid, _TRUNCATE);
+		strncpy_s(request.clientName, s_client_name, _TRUNCATE);
+		if (!brokerCall(request, reply)) {
+			printf("[SUDOVDA] Display broker couldn't add the virtual display.\n");
+			return std::wstring();
+		}
+		wprintf(L"[SUDOVDA] Virtual display added via broker: %ls\n", reply.deviceName);
+		return std::wstring(reply.deviceName);
+	}
+
 	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
 		return std::wstring();
 	}
@@ -689,6 +803,14 @@ std::wstring createVirtualDisplay(
 }
 
 bool removeVirtualDisplay(const GUID& guid) {
+	if (isDisplayBrokerClient()) {
+		BrokerRequest request {};
+		BrokerReply reply {};
+		request.op = BROKER_REMOVE;
+		request.guid = guid;
+		return brokerCall(request, reply);
+	}
+
 	if (SUDOVDA_DRIVER_HANDLE == INVALID_HANDLE_VALUE) {
 		return false;
 	}

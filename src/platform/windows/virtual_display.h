@@ -44,5 +44,12 @@ namespace VDISPLAY {
 	);
 	bool removeVirtualDisplay(const GUID& guid);
 
+	// SudoVDA allows a single open handle: with extra screens the main instance serves
+	// add/remove requests on a local pipe (startDisplayBroker) and the extra screens' processes
+	// send theirs there (useDisplayBroker, before any other VDISPLAY call).
+	void startDisplayBroker(const std::wstring& pipeName);
+	void useDisplayBroker(const std::wstring& pipeName);
+	bool isDisplayBrokerClient();
+
 	std::vector<std::wstring> matchDisplay(std::wstring sMatch);
 }

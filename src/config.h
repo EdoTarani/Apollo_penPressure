@@ -193,6 +193,7 @@ namespace config {
     int extra_screens;  ///< Extra screens (companion instances) this instance starts, 0..2
     std::string paired_devices_file;  ///< Companion instances: trust the devices paired in this state file
     int extra_screen_index;  ///< Companion instances: which extra screen this is (2, 3); 0 for the main instance
+    std::string vdisplay_broker;  ///< Companion instances: the main instance's virtual display broker pipe
   };
 
   struct input_t {
