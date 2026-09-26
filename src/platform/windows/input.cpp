@@ -1186,7 +1186,9 @@ namespace platf {
     if (!raw->pen) {
       if (pen.eventType != LI_TOUCH_EVENT_CANCEL_ALL) {
         BOOST_LOG(info) << "Creating virtual pen input device"sv;
-        raw->pen = raw->global->fnCreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT);
+        // No tap ripples or press-and-hold rings drawn over the user's work (a pen display
+        // doesn't show them either)
+        raw->pen = raw->global->fnCreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_NONE);
         if (!raw->pen) {
           auto err = GetLastError();
           BOOST_LOG(warning) << "Failed to create virtual pen device: "sv << err;

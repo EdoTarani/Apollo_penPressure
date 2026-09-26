@@ -728,10 +728,11 @@ namespace proc {
 
 #ifdef _WIN32
     // Home/office: with virtual screens, closing Moonlight removes them and puts the office
-    // monitors back exactly as they were. (An extra screen ends too, so its next connection
-    // launches again and gets its display.)
-    if (this->virtual_display &&
-        (config::nvhttp.extra_screen_index > 0 || config::nvhttp.extra_screens > 0 || config::nvhttp.disable_physical_displays)) {
+    // monitors back exactly as they were. With extra screens every screen's app ends, even one
+    // that didn't get its display: resuming it would skip creating the display again, and that
+    // screen would keep streaming another screen's picture.
+    if (config::nvhttp.extra_screen_index > 0 || config::nvhttp.extra_screens > 0 ||
+        (this->virtual_display && config::nvhttp.disable_physical_displays)) {
       BOOST_LOG(info) << "All clients disconnected: ending [" << _app_name << "] to remove the virtual displays and restore the monitors";
       terminate();
       return;
