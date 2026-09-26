@@ -919,9 +919,18 @@ namespace platf::virtual_tablet {
     }
 
     BOOST_LOG(info) << "Virtual tablet: serving Wacom Cintiq 22 on 127.0.0.1:"sv << USBIP_TCP_PORT;
-    // Unplugged until a stream starts (also removes one left plugged in by a previous run)
+    // Unplugged until a stream starts (also removes one left plugged in by a previous run:
+    // usbip-win2 reconnects that one by itself a few seconds after we start, so look again)
     g_want_plugged = false;
-    std::thread(apply_plugged).detach();
+    std::thread([] {
+      for (auto delay : {0s, 8s, 20s}) {
+        std::this_thread::sleep_for(delay);
+        if (g_stopping || g_want_plugged) {
+          return;
+        }
+        apply_plugged();
+      }
+    }).detach();
   }
 
   void stop() {

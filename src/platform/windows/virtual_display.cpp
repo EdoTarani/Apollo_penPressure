@@ -1244,10 +1244,19 @@ std::wstring createVirtualDisplay(
 		}
 
 		uint32_t retryInterval = 20, waited = 0;
+		bool extended = false;
 		while (!(named = GetAddedDisplayName(output, deviceName)) && waited < 8000) {
 			Sleep(retryInterval);
 			waited += retryInterval;
 			retryInterval = (std::min)(retryInterval * 2, 500u);
+
+			// A display that stays off gets no name. After the monitors were switched off with a
+			// supplied layout, Windows leaves the next new display off: switch everything on
+			// (the caller switches the monitors off again afterwards)
+			if (!extended && waited >= 1500) {
+				extended = true;
+				extendAllDisplays();
+			}
 		}
 		if (!named) {
 			printf("[SUDOVDA] Cannot get name for newly added virtual display (attempt %d)!\n", attempt + 1);
