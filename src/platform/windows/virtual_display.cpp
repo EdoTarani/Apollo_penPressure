@@ -148,6 +148,66 @@ bool extendAllDisplays() {
 	return result == ERROR_SUCCESS;
 }
 
+/**
+ * Switch on the display at (adapter, target) when Windows left it off, e.g. because it applied a
+ * remembered layout in which this monitor was off: its path joins the active configuration with
+ * a free source, and the result is remembered (so Windows switches it on by itself next time).
+ */
+bool activateTarget(const LUID& adapter, UINT32 targetId) {
+	std::lock_guard lock(g_configMutex);
+	UINT32 pathCount = 0, modeCount = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) {
+		return false;
+	}
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+	if (QueryDisplayConfig(QDC_ALL_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) != ERROR_SUCCESS) {
+		return false;
+	}
+	paths.resize(pathCount);
+	modes.resize(modeCount);
+
+	auto sameLuid = [](const LUID& a, const LUID& b) {
+		return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
+	};
+	std::vector<DISPLAYCONFIG_PATH_INFO> active;
+	for (auto& path : paths) {
+		if (path.flags & DISPLAYCONFIG_PATH_ACTIVE) {
+			active.push_back(path);
+		}
+	}
+
+	for (auto& candidate : paths) {
+		if ((candidate.flags & DISPLAYCONFIG_PATH_ACTIVE) || !candidate.targetInfo.targetAvailable ||
+			!sameLuid(candidate.targetInfo.adapterId, adapter) || candidate.targetInfo.id != targetId) {
+			continue;
+		}
+		bool sourceTaken = false;
+		for (auto& path : active) {
+			if (sameLuid(path.sourceInfo.adapterId, candidate.sourceInfo.adapterId) && path.sourceInfo.id == candidate.sourceInfo.id) {
+				sourceTaken = true;
+				break;
+			}
+		}
+		if (sourceTaken) {
+			continue;
+		}
+
+		auto path = candidate;
+		path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+		path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+		path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+		auto config = active;
+		config.push_back(path);
+		LONG result = SetDisplayConfig((UINT32) config.size(), config.data(), (UINT32) modes.size(), modes.data(),
+			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
+		printf("[SUDOVDA] Switched on display target %u: %ld\n", targetId, result);
+		return result == ERROR_SUCCESS;
+	}
+	printf("[SUDOVDA] Display target %u: no free path to switch it on\n", targetId);
+	return false;
+}
+
 void setKeepPhysicalOff(bool on) {
 	g_keepPhysicalOff = on;
 }
@@ -457,12 +517,30 @@ void restorePhysicalDisplays() {
 	}
 	g_physicalDisabled = false;
 
-	// Exactly the layout from before (the virtual displays are gone by now); if that no
-	// longer fits (e.g. a monitor was unplugged), the user's usual extended layout
+	// Wait (up to 3 s) until Windows has let go of the removed virtual displays: a layout applied
+	// while they're still connected is remembered with them off, and Windows then keeps them off
+	// the next time they come (they'd never get a name)
+	for (int waited = 0; waited < 3000; waited += 100) {
+		bool virtualLeft = false;
+		DISPLAY_DEVICEW adapter {};
+		adapter.cb = sizeof(adapter);
+		for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); i++, adapter.cb = sizeof(adapter)) {
+			if ((adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) && wcsstr(adapter.DeviceString, L"Sudo")) {
+				virtualLeft = true;
+			}
+		}
+		if (!virtualLeft) {
+			break;
+		}
+		Sleep(100);
+	}
+
+	// Exactly the layout from before, not saved as Windows' remembered layout (it has the user's
+	// own); if that no longer fits (e.g. a monitor was unplugged), the usual extended layout
 	LONG result = ERROR_INVALID_PARAMETER;
 	if (!g_savedPaths.empty()) {
 		result = SetDisplayConfig((UINT32) g_savedPaths.size(), g_savedPaths.data(), (UINT32) g_savedModes.size(), g_savedModes.data(),
-			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
+			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
 	}
 	if (result != ERROR_SUCCESS) {
 		result = SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
@@ -1255,7 +1333,9 @@ std::wstring createVirtualDisplay(
 			// (the caller switches the monitors off again afterwards)
 			if (!extended && waited >= 1500) {
 				extended = true;
-				extendAllDisplays();
+				if (!activateTarget(output.AdapterLuid, output.TargetId)) {
+					extendAllDisplays();
+				}
 			}
 		}
 		if (!named) {

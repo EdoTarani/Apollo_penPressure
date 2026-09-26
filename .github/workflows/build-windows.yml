@@ -87,7 +87,7 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
           # Upstream 0.4.6 + this fork's changes; without it the build reports 0.0.0
-          BUILD_VERSION: '0.4.8.9'
+          BUILD_VERSION: '0.4.9.0'
         run: |
           export PATH="$PATH:$(cygpath "$NODEJS_PATH")"
           cmake -B build -G Ninja -S . \
