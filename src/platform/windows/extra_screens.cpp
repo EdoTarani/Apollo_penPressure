@@ -51,6 +51,60 @@ namespace platf::extra_screens {
       return R"(\\.\pipe\ApolloVDisplay-)" + std::to_string(config::sunshine.port);
     }
 
+    /// Where the running extra screens are recorded (process id + creation time per line)
+    fs::path pids_path() {
+      return fs::path(config::sunshine.config_file).parent_path() / "sunshine_screens.pids";
+    }
+
+    uint64_t creation_time(HANDLE process) {
+      FILETIME created {}, exited {}, kernel {}, user {};
+      if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        return 0;
+      }
+      return ((uint64_t) created.dwHighDateTime << 32) | created.dwLowDateTime;
+    }
+
+    /**
+     * End extra screens left over from a previous run of the main instance (e.g. if it was
+     * killed in a way that didn't take them along). They'd keep the extra screens' ports and
+     * logs, so the new ones can't work. Only exactly the recorded processes (id + creation
+     * time) running our own executable are ended.
+     */
+    void end_leftovers() {
+      std::ifstream in(pids_path());
+      wchar_t own_exe[MAX_PATH];
+      GetModuleFileNameW(nullptr, own_exe, MAX_PATH);
+      DWORD pid;
+      uint64_t created;
+      while (in >> pid >> created) {
+        HANDLE process = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+        if (!process) {
+          continue;
+        }
+        wchar_t exe[MAX_PATH];
+        DWORD size = MAX_PATH;
+        if (creation_time(process) == created && QueryFullProcessImageNameW(process, 0, exe, &size) &&
+            _wcsicmp(exe, own_exe) == 0 && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+          BOOST_LOG(warning) << "Extra screens: ending a leftover extra screen from the previous run (process "sv << pid << ')';
+          TerminateProcess(process, 0);
+          WaitForSingleObject(process, 5000);
+        }
+        CloseHandle(process);
+      }
+      in.close();
+      std::error_code ec;
+      fs::remove(pids_path(), ec);
+    }
+
+    void save_pids() {
+      std::ofstream out(pids_path(), std::ios::trunc);
+      for (auto &c : g_children) {
+        if (c.process) {
+          out << GetProcessId(c.process) << ' ' << creation_time(c.process) << '\n';
+        }
+      }
+    }
+
     std::string trim(const std::string &s) {
       auto b = s.find_first_not_of(" \t\r\n");
       auto e = s.find_last_not_of(" \t\r\n");
@@ -192,7 +246,9 @@ namespace platf::extra_screens {
         BOOST_LOG(error) << "Extra screen "sv << child.screen << ": couldn't start ("sv << create_error << ')';
         return false;
       }
-      AssignProcessToJobObject(g_job, pi.hProcess);  // ends together with this process
+      if (!AssignProcessToJobObject(g_job, pi.hProcess)) {  // ends together with this process
+        BOOST_LOG(warning) << "Extra screen "sv << child.screen << ": couldn't tie it to this process ("sv << GetLastError() << ')';
+      }
       ResumeThread(pi.hThread);
       CloseHandle(pi.hThread);
       child.process = pi.hProcess;
@@ -227,6 +283,7 @@ namespace platf::extra_screens {
               return;
             }
             launch(c);
+            save_pids();
           }
         }
       }
@@ -244,6 +301,8 @@ namespace platf::extra_screens {
     if (count <= 0) {
       return;
     }
+
+    end_leftovers();
 
     // SudoVDA takes one handle at a time and we hold it: serve the extra screens' display requests
     VDISPLAY::startDisplayBroker(platf::from_utf8(broker_pipe_utf8()));
@@ -269,6 +328,7 @@ namespace platf::extra_screens {
       launch(child);
       g_children.push_back(child);
     }
+    save_pids();
 
     g_monitor = std::thread(monitor);
   }
@@ -288,6 +348,8 @@ namespace platf::extra_screens {
       }
     }
     g_children.clear();
+    std::error_code ec;
+    fs::remove(pids_path(), ec);
     CloseHandle(g_job);
     CloseHandle(g_stop_event);
     g_job = nullptr;
