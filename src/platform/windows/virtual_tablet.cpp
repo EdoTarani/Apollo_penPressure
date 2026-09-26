@@ -844,6 +844,51 @@ namespace platf::virtual_tablet {
       return std::atoi(port_output.c_str() + port + 5);
     }
 
+    /// The screens on the desktop: name, position and size of each
+    std::wstring display_layout() {
+      std::wstring layout;
+      DISPLAY_DEVICEW adapter {};
+      adapter.cb = sizeof(adapter);
+      for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); i++, adapter.cb = sizeof(adapter)) {
+        if (!(adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+          continue;
+        }
+        DEVMODEW mode {};
+        mode.dmSize = sizeof(mode);
+        EnumDisplaySettingsExW(adapter.DeviceName, ENUM_CURRENT_SETTINGS, &mode, 0);
+        layout += std::wstring(adapter.DeviceName) + L"@" + std::to_wstring(mode.dmPosition.x) + L"," +
+                  std::to_wstring(mode.dmPosition.y) + L":" + std::to_wstring(mode.dmPelsWidth) + L"x" +
+                  std::to_wstring(mode.dmPelsHeight) + L";";
+      }
+      return layout;
+    }
+
+    /**
+     * The Wacom driver maps a pen display with the screen layout it sees when the tablet
+     * appears. At a stream's start the screens are still being created and arranged, so wait
+     * until the layout has been the same for 4 s (at most 20 s).
+     */
+    bool wait_for_stable_screens() {
+      auto start = std::chrono::steady_clock::now();
+      auto stable_since = start;
+      auto layout = display_layout();
+      while (std::chrono::steady_clock::now() - stable_since < 4s) {
+        if (!g_want_plugged || g_stopping) {
+          return false;
+        }
+        if (std::chrono::steady_clock::now() - start > 20s) {
+          break;
+        }
+        std::this_thread::sleep_for(250ms);
+        auto now_layout = display_layout();
+        if (now_layout != layout) {
+          layout = std::move(now_layout);
+          stable_since = std::chrono::steady_clock::now();
+        }
+      }
+      return true;
+    }
+
     void apply_plugged() {
       std::lock_guard lg(g_plug_mutex);
       bool want = g_want_plugged;
@@ -861,6 +906,9 @@ namespace platf::virtual_tablet {
       int port = our_usbip_port(out);
 
       if (want && port < 0) {
+        if (!wait_for_stable_screens()) {
+          return;  // the stream ended meanwhile
+        }
         out.clear();
         auto args = L"-t " + std::to_wstring(USBIP_TCP_PORT) + L" attach -r 127.0.0.1 -b " + std::wstring(BUSID, BUSID + std::strlen(BUSID));
         run_usbip(args, out, code);
