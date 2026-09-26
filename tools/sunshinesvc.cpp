@@ -176,6 +176,18 @@ bool RunTerminationHelper(HANDLE console_token, DWORD pid) {
   return exit_code == 0;
 }
 
+// Ctrl+Alt+Del for Apollo: Windows only accepts the secure attention sequence from a
+// service (with the SoftwareSASGeneration policy), so Apollo signals this and we send it
+DWORD WINAPI SendSasThread(LPVOID param) {
+  auto send_sas = (void(WINAPI *)(BOOL)) GetProcAddress(LoadLibraryW(L"sas.dll"), "SendSAS");
+  while (WaitForSingleObject((HANDLE) param, INFINITE) == WAIT_OBJECT_0) {
+    if (send_sas) {
+      send_sas(FALSE);
+    }
+  }
+  return 0;
+}
+
 VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
   service_status_handle = RegisterServiceCtrlHandlerEx(SERVICE_NAME, HandlerEx, nullptr);
   if (service_status_handle == nullptr) {
@@ -244,6 +256,10 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
 
   // Only allow Sunshine.exe to inherit the log file handle, not all inheritable handles
   UpdateProcThreadAttribute(startup_info.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &log_file_handle, sizeof(log_file_handle), nullptr, nullptr);
+
+  if (HANDLE sas_event = CreateEventW(nullptr, FALSE, FALSE, L"Global\\ApolloSendSAS")) {
+    CreateThread(nullptr, 0, SendSasThread, sas_event, 0, nullptr);
+  }
 
   // Tell SCM we're running (and stoppable now)
   service_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN | SERVICE_ACCEPT_SESSIONCHANGE;

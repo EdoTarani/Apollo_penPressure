@@ -81,6 +81,13 @@ namespace VDISPLAY {
 	// others with it; restorePhysicalDisplays() puts the monitors' layout back
 	bool makeMainDisplay(const wchar_t* deviceName);
 
+	// Which screen a virtual display belongs to (0 = screen 1), for layoutRow()
+	void setDisplaySlot(const wchar_t* deviceName, int slot);
+
+	// All virtual displays in a row by screen: screen 1 at 0,0 (the main display), then 2, 3;
+	// monitors that are on keep their layout, left of screen 1. restorePhysicalDisplays() undoes it.
+	bool layoutRow();
+
 	// At startup: if no physical display is on (e.g. left off by a crash), switch them on
 	void ensurePhysicalDisplaysOn();
 

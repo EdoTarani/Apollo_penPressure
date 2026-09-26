@@ -630,6 +630,14 @@ namespace platf {
       RegCloseKey(key);
     }
 
+    // Windows takes it from a service: ask Apollo's (tools\sunshinesvc) to send it
+    if (HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"Global\\ApolloSendSAS")) {
+      SetEvent(event);
+      CloseHandle(event);
+      BOOST_LOG(info) << "Ctrl+Alt+Del sent (through the Apollo service)"sv;
+      return;
+    }
+
     static auto send_sas = (void(WINAPI *)(BOOL)) GetProcAddress(LoadLibraryW(L"sas.dll"), "SendSAS");
     if (send_sas) {
       send_sas(FALSE);

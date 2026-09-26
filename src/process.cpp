@@ -347,12 +347,8 @@ namespace proc {
           if (config::video.isolated_virtual_display_option == true) {
             // Apply the isolated display settings
             VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
-          } else if (config::nvhttp.extra_screen_index == 0 && config::nvhttp.extra_screens_arrange && config::nvhttp.extra_screens > 0) {
-            // Screen 1 first in the row, right of the physical monitors (the broker places the
-            // extra screens next to it)
-            if (!VDISPLAY::arrangeInRow(vdisplayName.c_str(), 0)) {
-              BOOST_LOG(warning) << "Couldn't place the virtual display next to the others"sv;
-            }
+          } else if (config::nvhttp.extra_screen_index == 0) {
+            VDISPLAY::setDisplaySlot(vdisplayName.c_str(), 0);  // screen 1
           }
 
           if (config::nvhttp.extra_screen_index == 0) {
@@ -367,9 +363,10 @@ namespace proc {
                 BOOST_LOG(info) << "Physical displays switched off while streaming"sv;
               }
             }
-            // With the monitors on, screen 1 still becomes the main display: the taskbar, the
-            // login/lock screen and new windows show there, not on an office monitor
-            if (!physical_off && VDISPLAY::makeMainDisplay(vdisplayName.c_str())) {
+            // Screen 1 is the main display (taskbar, login/lock screen, new windows), the extra
+            // screens follow it as they connect; monitors that stay on go left of it
+            if (!config::video.isolated_virtual_display_option &&
+                (config::nvhttp.extra_screens_arrange || !physical_off) && VDISPLAY::layoutRow()) {
               BOOST_LOG(info) << "Screen 1 is the main display while streaming"sv;
             }
             BOOST_LOG(info) << "Displays on: "sv << platf::to_utf8(VDISPLAY::describeDisplays());
