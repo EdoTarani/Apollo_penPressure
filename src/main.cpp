@@ -372,6 +372,12 @@ int main(int argc, char *argv[]) {
     if (proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
       std::string probe_uuid_str = PROBE_DISPLAY_UUID;
       auto probe_uuid = uuid_util::uuid_t::parse(probe_uuid_str);
+      // Extra screens probe at the same time through the main instance's display broker: give
+      // each its own probe display so one can't remove another's mid-probe
+      if (config::nvhttp.extra_screen_index > 0) {
+        probe_uuid.b64[1] ^= (uint64_t) config::nvhttp.extra_screen_index;
+        probe_uuid_str = probe_uuid.string();
+      }
       auto* probe_guid = (GUID*)(void*)&probe_uuid;
 
       BOOST_LOG(info) << "Creating a temporary virtual display to probe for encoders..."sv;

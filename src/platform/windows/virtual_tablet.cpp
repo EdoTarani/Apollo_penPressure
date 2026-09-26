@@ -55,7 +55,7 @@ namespace platf::virtual_tablet {
     constexpr uint32_t PEN_SERIAL_LO = 0x97800A01, PEN_SERIAL_HI = 0x00100842;  // Pro Pen 2
     constexpr uint16_t TOOL_PRO_PEN2 = 0x0842, TOOL_PRO_PEN2_ERASER = 0x084A;
     constexpr const char *SERIAL = "9GQ00Y1003861";
-    constexpr size_t MAX_QUEUED_REPORTS = 64;
+    constexpr size_t MAX_QUEUED_REPORTS = 16;  // motion is merged, so this only holds state changes
 
     // ---------------------------------------------------------------- byte helpers
     void put8(std::vector<uint8_t> &v, uint8_t x) {
@@ -311,7 +311,22 @@ namespace platf::virtual_tablet {
 
     /// Queue the current pen state as an interrupt report (caller holds g_mutex)
     void queue_report_locked() {
-      g_reports.push_back(g_data_mode == 2 ? g_pen.report10() : g_pen.report06());
+      auto report = g_data_mode == 2 ? g_pen.report10() : g_pen.report06();
+
+      // If the host fell behind, the newest position is all that matters: replace a queued
+      // report that differs only in motion (same report ID and tip/button/eraser/range flags)
+      // instead of lining up stale positions. Presses, releases and button changes always
+      // get their own report, so nothing is lost; when the host keeps up this never triggers.
+      if (!g_reports.empty()) {
+        auto &last = g_reports.back();
+        if (last.size() == report.size() && last.size() > 1 && last[0] == report[0] && last[1] == report[1]) {
+          last = std::move(report);
+          g_cv.notify_all();
+          return;
+        }
+      }
+
+      g_reports.push_back(std::move(report));
       while (g_reports.size() > MAX_QUEUED_REPORTS) {
         g_reports.pop_front();  // keep latency bounded
       }
