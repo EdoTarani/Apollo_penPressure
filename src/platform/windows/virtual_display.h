@@ -77,6 +77,10 @@ namespace VDISPLAY {
 	bool keepOnlyVirtualDisplays();
 	void restorePhysicalDisplays();
 
+	// Make this display the main one (at 0,0: taskbar, login screen, new windows), moving the
+	// others with it; restorePhysicalDisplays() puts the monitors' layout back
+	bool makeMainDisplay(const wchar_t* deviceName);
+
 	// At startup: if no physical display is on (e.g. left off by a crash), switch them on
 	void ensurePhysicalDisplaysOn();
 

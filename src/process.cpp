@@ -359,11 +359,18 @@ namespace proc {
             // Only the virtual displays stay on while streaming. The extra screens' displays
             // are created through our broker when they connect, one at a time, and it switches
             // the monitors off again after each (Windows may switch them on for a new display).
+            bool physical_off = false;
             if (config::nvhttp.disable_physical_displays) {
               VDISPLAY::setKeepPhysicalOff(true);
-              if (VDISPLAY::keepOnlyVirtualDisplays()) {
+              physical_off = VDISPLAY::keepOnlyVirtualDisplays();
+              if (physical_off) {
                 BOOST_LOG(info) << "Physical displays switched off while streaming"sv;
               }
+            }
+            // With the monitors on, screen 1 still becomes the main display: the taskbar, the
+            // login/lock screen and new windows show there, not on an office monitor
+            if (!physical_off && VDISPLAY::makeMainDisplay(vdisplayName.c_str())) {
+              BOOST_LOG(info) << "Screen 1 is the main display while streaming"sv;
             }
             BOOST_LOG(info) << "Displays on: "sv << platf::to_utf8(VDISPLAY::describeDisplays());
           }

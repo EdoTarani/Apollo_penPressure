@@ -293,6 +293,67 @@ bool keepOnlyVirtualDisplays() {
 	return result == ERROR_SUCCESS;
 }
 
+bool makeMainDisplay(const wchar_t* deviceName) {
+	std::lock_guard lock(g_configMutex);
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+	if (!activePaths(paths, modes)) {
+		return false;
+	}
+
+	// Find our display's position, and remember the monitors' layout (first change only)
+	POINTL origin {};
+	bool found = false;
+	std::vector<DISPLAYCONFIG_PATH_INFO> saved;
+	std::vector<DISPLAYCONFIG_MODE_INFO> savedModes;
+	for (auto path : paths) {
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
+		source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+		source.header.size = sizeof(source);
+		source.header.adapterId = path.sourceInfo.adapterId;
+		source.header.id = path.sourceInfo.id;
+		if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS) {
+			continue;
+		}
+		auto idx = path.sourceInfo.modeInfoIdx;
+		if (_wcsicmp(source.viewGdiDeviceName, deviceName) == 0 && idx < modes.size()) {
+			origin = modes[idx].sourceMode.position;
+			found = true;
+		} else if (!isSudoAdapter(source.viewGdiDeviceName)) {
+			for (auto* i : {&path.sourceInfo.modeInfoIdx, &path.targetInfo.modeInfoIdx}) {
+				if (*i != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && *i < modes.size()) {
+					savedModes.push_back(modes[*i]);
+					*i = (UINT32) savedModes.size() - 1;
+				}
+			}
+			saved.push_back(path);
+		}
+	}
+	if (!found) {
+		wprintf(L"[SUDOVDA] Can't make %ls the main display: it isn't on\n", deviceName);
+		return false;
+	}
+
+	// Shift the whole desktop so our display sits at 0,0
+	for (auto& mode : modes) {
+		if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+			mode.sourceMode.position.x -= origin.x;
+			mode.sourceMode.position.y -= origin.y;
+		}
+	}
+	LONG result = SetDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
+		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
+	wprintf(L"[SUDOVDA] %ls is the main display: %ld\n", deviceName, result);
+	if (result == ERROR_SUCCESS) {
+		if (!g_physicalDisabled && !saved.empty()) {
+			g_savedPaths = std::move(saved);
+			g_savedModes = std::move(savedModes);
+		}
+		g_physicalDisabled = true;  // the layout to restore is saved
+	}
+	return result == ERROR_SUCCESS;
+}
+
 void restorePhysicalDisplays() {
 	std::lock_guard lock(g_configMutex);
 	if (!g_physicalDisabled) {
