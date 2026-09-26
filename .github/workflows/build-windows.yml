@@ -61,12 +61,33 @@ jobs:
           $NODEJS_PATH = Split-Path -Path (Get-Command node).Source -Parent
           echo "NODEJS_PATH=$NODEJS_PATH" >> $env:GITHUB_ENV
 
+      # The virtual display driver binary and its installer tool aren't in git (*.dll/*.exe
+      # are ignored upstream); take them from the official Apollo 0.4.6 installer, whose
+      # SudoVDA.inf/.cat are the ones in this repo. Pinned by hash.
+      - name: SudoVDA driver files
+        shell: pwsh
+        run: |
+          $url = "https://github.com/ClassicOldSong/Apollo/releases/download/v0.4.6/Apollo-0.4.6.exe"
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\apollo-official.exe"
+          & "C:\Program Files\7-Zip\7z.exe" x -y "-o$env:RUNNER_TEMP\apollo-official" "$env:RUNNER_TEMP\apollo-official.exe" "drivers\sudovda\SudoVDA.dll" "drivers\sudovda\nefconc.exe"
+          $src = "$env:RUNNER_TEMP\apollo-official\drivers\sudovda"
+          $expected = @{
+            "SudoVDA.dll" = "47EE263CB5DE9382C6630A2D7F3DAFEC4A49419F953BEEC869CA5DD0C460FF63"
+            "nefconc.exe" = "9DBA1F1A9E2B21843C4A0CA6C6FFA9E747250DD6E42C8C14325CA069AD43EA8F"
+          }
+          foreach ($file in $expected.Keys) {
+            $hash = (Get-FileHash "$src\$file" -Algorithm SHA256).Hash
+            if ($hash -ne $expected[$file]) { throw "$file hash mismatch: $hash" }
+            Copy-Item "$src\$file" "src_assets\windows\drivers\sudovda\$file"
+          }
+          Get-ChildItem src_assets\windows\drivers\sudovda
+
       - name: Build
         env:
           BRANCH: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
           # Upstream 0.4.6 + this fork's changes; without it the build reports 0.0.0
-          BUILD_VERSION: '0.4.7.5'
+          BUILD_VERSION: '0.4.7.6'
         run: |
           export PATH="$PATH:$(cygpath "$NODEJS_PATH")"
           cmake -B build -G Ninja -S . \
