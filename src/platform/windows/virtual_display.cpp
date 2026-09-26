@@ -1231,21 +1231,31 @@ std::wstring createVirtualDisplay(
 		}
 	}
 
-	VIRTUAL_DISPLAY_ADD_OUT output;
-	if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
-		printf("[SUDOVDA] Failed to add virtual display.\n");
-		return std::wstring();
-	}
-
-	uint32_t retryInterval = 20;
+	// Windows can take seconds to name a new display (e.g. while it reconfigures after the
+	// monitors were switched off): wait up to ~8 s; if it still has no name, remove that
+	// display (no orphans) and add it once more
 	wchar_t deviceName[CCHDEVICENAME]{};
-	while (!GetAddedDisplayName(output, deviceName)) {
-		Sleep(retryInterval);
-		if (retryInterval > 320) {
-			printf("[SUDOVDA] Cannot get name for newly added virtual display!\n");
+	bool named = false;
+	for (int attempt = 0; attempt < 2 && !named; ++attempt) {
+		VIRTUAL_DISPLAY_ADD_OUT output;
+		if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
+			printf("[SUDOVDA] Failed to add virtual display.\n");
 			return std::wstring();
 		}
-		retryInterval *= 2;
+
+		uint32_t retryInterval = 20, waited = 0;
+		while (!(named = GetAddedDisplayName(output, deviceName)) && waited < 8000) {
+			Sleep(retryInterval);
+			waited += retryInterval;
+			retryInterval = (std::min)(retryInterval * 2, 500u);
+		}
+		if (!named) {
+			printf("[SUDOVDA] Cannot get name for newly added virtual display (attempt %d)!\n", attempt + 1);
+			RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid);
+		}
+	}
+	if (!named) {
+		return std::wstring();
 	}
 
 	wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", deviceName);
