@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -320,6 +321,7 @@ namespace platf::virtual_tablet {
       std::chrono::steady_clock::time_point last_event {};
       int64_t max_gap_ms = 0;
       uint32_t events = 0, merged = 0, delivered = 0;
+      float last_x = 0, last_y = 0;  // the latest position sent to the tablet (0..1)
     } g_stats;
 
     void count_event_locked() {
@@ -342,6 +344,18 @@ namespace platf::virtual_tablet {
         BOOST_LOG(info) << "Virtual tablet: pen "sv << g_stats.events * 1000 / elapsed << " events/s, max gap "sv
                         << g_stats.max_gap_ms << " ms, "sv << g_stats.delivered * 1000 / elapsed << " reports/s to the driver, "sv
                         << g_stats.merged << " merged (host behind)"sv;
+
+        // Mapping check: where the tablet position ends up on screen, and on which monitor
+        POINT cursor {};
+        GetCursorPos(&cursor);
+        MONITORINFOEXW monitor {};
+        monitor.cbSize = sizeof(monitor);
+        GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &monitor);
+        char mapping[256];
+        snprintf(mapping, sizeof(mapping), "Virtual tablet: pen at %.3f,%.3f of the tablet -> cursor %ld,%ld on %ls [%ld,%ld %ldx%ld]",
+                 g_stats.last_x, g_stats.last_y, cursor.x, cursor.y, monitor.szDevice, monitor.rcMonitor.left, monitor.rcMonitor.top,
+                 monitor.rcMonitor.right - monitor.rcMonitor.left, monitor.rcMonitor.bottom - monitor.rcMonitor.top);
+        BOOST_LOG(info) << mapping;
         g_stats = {};
       }
     }
@@ -968,6 +982,8 @@ namespace platf::virtual_tablet {
   void submit(const pen_input_t &pen, float x, float y) {
     std::lock_guard lg(g_mutex);
     g_pen.apply(pen, x, y);
+    g_stats.last_x = x;
+    g_stats.last_y = y;
     queue_report_locked();
     count_event_locked();
   }
