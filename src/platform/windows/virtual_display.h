@@ -51,5 +51,9 @@ namespace VDISPLAY {
 	void useDisplayBroker(const std::wstring& pipeName);
 	bool isDisplayBrokerClient();
 
+	// Place a virtual display in slot `slot` (0, 1, 2) of a row to the right of the other
+	// (physical) displays, all at the top edge; slots are the display's own width apart
+	bool arrangeInRow(const wchar_t* deviceName, int slot);
+
 	std::vector<std::wstring> matchDisplay(std::wstring sMatch);
 }

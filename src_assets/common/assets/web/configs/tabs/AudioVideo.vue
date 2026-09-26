@@ -163,6 +163,15 @@ const validateFallbackMode = (event) => {
       <div class="form-text">{{ $t('config.extra_screens_desc') }}</div>
     </div>
 
+    <!-- Extra Screens: arrangement -->
+    <Checkbox class="mb-3"
+              id="extra_screens_arrange"
+              locale-prefix="config"
+              v-model="config.extra_screens_arrange"
+              default="true"
+              v-if="platform === 'windows' && config.extra_screens > 0"
+    ></Checkbox>
+
     <!-- Double Refreshrate -->
     <Checkbox class="mb-3"
               id="double_refreshrate"

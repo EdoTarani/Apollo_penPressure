@@ -5,6 +5,7 @@
 #include <initguid.h>
 #include <combaseapi.h>
 #include <thread>
+#include <algorithm>
 
 #include <wrl/client.h>
 #include <dxgi.h>
@@ -62,6 +63,38 @@ void useDisplayBroker(const std::wstring& pipeName) {
 
 bool isDisplayBrokerClient() {
 	return !g_brokerPipe.empty();
+}
+
+bool arrangeInRow(const wchar_t* deviceName, int slot) {
+	// Right edge of the displays on the desktop that aren't SudoVDA virtual displays
+	LONG right = 0;
+	DISPLAY_DEVICEW adapter {};
+	adapter.cb = sizeof(adapter);
+	for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); i++, adapter.cb = sizeof(adapter)) {
+		if (!(adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) || wcsstr(adapter.DeviceString, L"Sudo")) {
+			continue;
+		}
+		DEVMODEW mode {};
+		mode.dmSize = sizeof(mode);
+		if (EnumDisplaySettingsExW(adapter.DeviceName, ENUM_CURRENT_SETTINGS, &mode, 0)) {
+			right = (std::max)(right, mode.dmPosition.x + (LONG) mode.dmPelsWidth);
+		}
+	}
+
+	DEVMODEW mode {};
+	mode.dmSize = sizeof(mode);
+	if (!EnumDisplaySettingsExW(deviceName, ENUM_CURRENT_SETTINGS, &mode, 0)) {
+		return false;
+	}
+	mode.dmPosition.x = right + slot * (LONG) mode.dmPelsWidth;
+	mode.dmPosition.y = 0;
+	mode.dmFields = DM_POSITION;
+	LONG result = ChangeDisplaySettingsExW(deviceName, &mode, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
+	if (result == DISP_CHANGE_SUCCESSFUL) {
+		result = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+	}
+	wprintf(L"[SUDOVDA] Placed %ls at x=%ld (slot %d): %ld\n", deviceName, mode.dmPosition.x, slot, result);
+	return result == DISP_CHANGE_SUCCESSFUL;
 }
 
 void startDisplayBroker(const std::wstring& pipeName) {

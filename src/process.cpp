@@ -247,6 +247,7 @@ namespace proc {
 #ifdef _WIN32
     if (
       config::video.headless_mode        // Headless mode
+      || config::nvhttp.extra_screens > 0  // With extra screens, every screen is a virtual display
       || launch_session->virtual_display // User requested virtual display
       || _app.virtual_display            // App is configured to use virtual display
       || !video::allow_encoder_probing() // No active display presents
@@ -292,6 +293,8 @@ namespace proc {
         // instead of every instance sharing, and mirroring, the one display.
         if (config::nvhttp.extra_screen_index > 0) {
           device_uuid.b64[1] ^= 0x5343524545000000ull | (uint64_t) config::nvhttp.extra_screen_index;  // "SCREE" + index
+          // The display's identity (EDID serial) comes from the GUID's first part: make it distinct too
+          device_uuid.b64[0] ^= 0x53430000ull | (uint64_t) config::nvhttp.extra_screen_index;
           device_uuid_str = device_uuid.string();
           device_name += " Screen " + std::to_string(config::nvhttp.extra_screen_index);
         }
@@ -334,6 +337,13 @@ namespace proc {
           if (config::video.isolated_virtual_display_option == true) {
             // Apply the isolated display settings
             VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
+          } else if (config::nvhttp.extra_screens_arrange &&
+                     (config::nvhttp.extra_screens > 0 || config::nvhttp.extra_screen_index > 0)) {
+            // Screens 1, 2, 3 in a row, right of the physical monitors
+            int slot = config::nvhttp.extra_screen_index > 0 ? config::nvhttp.extra_screen_index - 1 : 0;
+            if (!VDISPLAY::arrangeInRow(vdisplayName.c_str(), slot)) {
+              BOOST_LOG(warning) << "Couldn't place the virtual display next to the others"sv;
+            }
           }
 
           // Set virtual_display to true when everything went fine
