@@ -328,57 +328,44 @@ namespace proc {
           BOOST_LOG(info) << "Virtual Display created at " << vdisplayName;
 
           // Don't change display settings when no params are given
-          if (launch_session->width && launch_session->height && launch_session->fps) {
-            // Apply display settings
+          if (launch_session->width && launch_session->height && launch_session->fps && config::nvhttp.extra_screen_index == 0) {
+            // Apply display settings (an extra screen's display got them from the broker)
             VDISPLAY::changeDisplaySettings(vdisplayName.c_str(), render_width, render_height, target_fps);
+          }
+
+          // Windows switches a new display on shortly after it's created. If it doesn't, streaming
+          // it would show black: switch all displays on (extended) instead.
+          if (config::nvhttp.extra_screen_index == 0 && !VDISPLAY::waitForDisplayActive(vdisplayName.c_str(), 3000)) {
+            BOOST_LOG(warning) << "Windows didn't switch the virtual display on; extending all displays"sv;
+            VDISPLAY::extendAllDisplays();
+            if (!VDISPLAY::waitForDisplayActive(vdisplayName.c_str(), 3000)) {
+              BOOST_LOG(error) << "The virtual display is still off"sv;
+            }
           }
 
           // Check the ISOLATED DISPLAY configuration setting and rearrange the displays
           if (config::video.isolated_virtual_display_option == true) {
             // Apply the isolated display settings
             VDISPLAY::changeDisplaySettings2(vdisplayName.c_str(), render_width, render_height, target_fps, true);
-          } else if (config::nvhttp.extra_screens_arrange &&
-                     (config::nvhttp.extra_screens > 0 || config::nvhttp.extra_screen_index > 0)) {
-            // Screens 1, 2, 3 in a row, right of the physical monitors
-            int slot = config::nvhttp.extra_screen_index > 0 ? config::nvhttp.extra_screen_index - 1 : 0;
-            if (!VDISPLAY::arrangeInRow(vdisplayName.c_str(), slot)) {
+          } else if (config::nvhttp.extra_screen_index == 0 && config::nvhttp.extra_screens_arrange && config::nvhttp.extra_screens > 0) {
+            // Screen 1 first in the row, right of the physical monitors (the broker places the
+            // extra screens next to it)
+            if (!VDISPLAY::arrangeInRow(vdisplayName.c_str(), 0)) {
               BOOST_LOG(warning) << "Couldn't place the virtual display next to the others"sv;
             }
           }
 
           if (config::nvhttp.extra_screen_index == 0) {
-            // Create the extra screens' displays now, before anything streams: adding displays
-            // later renumbers Windows' displays under a running capture. Each extra screen
-            // computes the same GUID and gets its display back from us through the broker.
-            for (int screen = 2; screen <= config::nvhttp.extra_screens + 1; ++screen) {
-              auto screen_uuid = device_uuid;
-              screen_uuid.b64[1] ^= 0x5343524545000000ull | (uint64_t) screen;
-              screen_uuid.b64[0] ^= 0x53430000ull | (uint64_t) screen;
-              GUID screen_guid;
-              memcpy(&screen_guid, &screen_uuid, sizeof(GUID));
-              auto screen_name = device_name + " Screen " + std::to_string(screen);
-
-              auto screen_display = VDISPLAY::createVirtualDisplay(screen_uuid.string().c_str(), screen_name.c_str(),
-                                                                   render_width, render_height, target_fps, screen_guid);
-              if (screen_display.empty()) {
-                BOOST_LOG(warning) << "Couldn't create the virtual display for screen "sv << screen;
-                continue;
-              }
-              BOOST_LOG(info) << "Virtual Display for screen "sv << screen << " created at "sv << platf::to_utf8(screen_display);
-              if (launch_session->width && launch_session->height && launch_session->fps) {
-                VDISPLAY::changeDisplaySettings(screen_display.c_str(), render_width, render_height, target_fps);
-              }
-              if (config::nvhttp.extra_screens_arrange && !config::video.isolated_virtual_display_option) {
-                VDISPLAY::arrangeInRow(screen_display.c_str(), screen - 1);
-              }
-            }
-
-            // Only the virtual displays stay on while streaming
+            // Only the virtual displays stay on while streaming. The extra screens' displays
+            // are created through our broker when they connect, one at a time, and it switches
+            // the monitors off again after each (Windows may switch them on for a new display).
             if (config::nvhttp.disable_physical_displays) {
+              VDISPLAY::setKeepPhysicalOff(true);
               if (VDISPLAY::keepOnlyVirtualDisplays()) {
                 BOOST_LOG(info) << "Physical displays switched off while streaming"sv;
               }
             }
+            BOOST_LOG(info) << "Displays on: "sv << platf::to_utf8(VDISPLAY::describeDisplays());
           }
 
           // Set virtual_display to true when everything went fine
@@ -846,7 +833,8 @@ namespace proc {
       }
 
       if (config::nvhttp.extra_screen_index == 0) {
-        // The extra screens' displays we created up front, then the physical monitors back on
+        // The extra screens' displays (created through our broker), then the monitors back on
+        VDISPLAY::setKeepPhysicalOff(false);
         VDISPLAY::removeAllVirtualDisplays();
         VDISPLAY::restorePhysicalDisplays();
       }

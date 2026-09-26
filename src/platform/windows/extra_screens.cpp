@@ -305,7 +305,8 @@ namespace platf::extra_screens {
     end_leftovers();
 
     // SudoVDA takes one handle at a time and we hold it: serve the extra screens' display requests
-    VDISPLAY::startDisplayBroker(platf::from_utf8(broker_pipe_utf8()));
+    VDISPLAY::startDisplayBroker(platf::from_utf8(broker_pipe_utf8()),
+                                 config::nvhttp.extra_screens_arrange && !config::video.isolated_virtual_display_option);
 
     // With several screens, one virtual tablet spans them all
     config::input.pen_virtual_tablet_desktop = true;

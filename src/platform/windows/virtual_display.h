@@ -47,8 +47,22 @@ namespace VDISPLAY {
 	// SudoVDA allows a single open handle: with extra screens the main instance serves
 	// add/remove requests on a local pipe (startDisplayBroker) and the extra screens' processes
 	// send theirs there (useDisplayBroker, before any other VDISPLAY call).
-	void startDisplayBroker(const std::wstring& pipeName);
-	void useDisplayBroker(const std::wstring& pipeName);
+	// arrange: place each extra screen's display in the row (slot = screen - 1) as it's created
+	void startDisplayBroker(const std::wstring& pipeName, bool arrange);
+	// screenIndex: which extra screen this process is (2, 3)
+	void useDisplayBroker(const std::wstring& pipeName, int screenIndex);
+
+	// Wait until Windows has switched a new display on (attached it to the desktop)
+	bool waitForDisplayActive(const wchar_t* deviceName, int timeoutMs);
+
+	// Switch every connected display on, extended
+	bool extendAllDisplays();
+
+	// While on, every display the broker adds is followed by switching the physical monitors off
+	void setKeepPhysicalOff(bool on);
+
+	// "\\.\DISPLAY5 virtual 2560x1440 at 0,0; ..." for the log
+	std::wstring describeDisplays();
 	bool isDisplayBrokerClient();
 
 	// Place a virtual display in slot `slot` (0, 1, 2) of a row to the right of the other

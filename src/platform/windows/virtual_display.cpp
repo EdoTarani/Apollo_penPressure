@@ -44,6 +44,12 @@ namespace {
 	}
 
 	bool g_physicalDisabled = false;
+	int g_screenIndex = 0;           // broker client: which extra screen we are
+	bool g_brokerArrange = false;    // broker: place new displays in the row
+	bool g_keepPhysicalOff = false;  // broker: switch the monitors off after adding a display
+
+	// All display configuration changes happen one at a time (session thread and broker)
+	std::recursive_mutex g_configMutex;
 
 	// The physical monitors' exact layout before they were switched off, to put back
 	std::vector<DISPLAYCONFIG_PATH_INFO> g_savedPaths;
@@ -92,6 +98,7 @@ namespace {
 		uint32_t width, height, fps;
 		char clientUid[128];
 		char clientName[128];
+		uint32_t screen;  // the extra screen asking (2, 3)
 	};
 
 	struct BrokerReply {
@@ -110,8 +117,56 @@ namespace {
 	}
 }
 
-void useDisplayBroker(const std::wstring& pipeName) {
+void useDisplayBroker(const std::wstring& pipeName, int screenIndex) {
 	g_brokerPipe = pipeName;
+	g_screenIndex = screenIndex;
+}
+
+bool waitForDisplayActive(const wchar_t* deviceName, int timeoutMs) {
+	for (int waited = 0;; waited += 100) {
+		DISPLAY_DEVICEW adapter {};
+		adapter.cb = sizeof(adapter);
+		for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); i++, adapter.cb = sizeof(adapter)) {
+			if (_wcsicmp(adapter.DeviceName, deviceName) == 0 && (adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+				return true;
+			}
+		}
+		if (waited >= timeoutMs) {
+			return false;
+		}
+		Sleep(100);
+	}
+}
+
+bool extendAllDisplays() {
+	std::lock_guard lock(g_configMutex);
+	LONG result = SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+	printf("[SUDOVDA] Extend all displays: %ld\n", result);
+	return result == ERROR_SUCCESS;
+}
+
+void setKeepPhysicalOff(bool on) {
+	g_keepPhysicalOff = on;
+}
+
+std::wstring describeDisplays() {
+	std::wstring out;
+	DISPLAY_DEVICEW adapter {};
+	adapter.cb = sizeof(adapter);
+	for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); i++, adapter.cb = sizeof(adapter)) {
+		if (!(adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+			continue;
+		}
+		DEVMODEW mode {};
+		mode.dmSize = sizeof(mode);
+		EnumDisplaySettingsExW(adapter.DeviceName, ENUM_CURRENT_SETTINGS, &mode, 0);
+		wchar_t line[256];
+		swprintf_s(line, L"%ls%ls %ls%lux%lu at %ld,%ld", out.empty() ? L"" : L"; ", adapter.DeviceName,
+			wcsstr(adapter.DeviceString, L"Sudo") ? L"virtual " : L"", mode.dmPelsWidth, mode.dmPelsHeight,
+			mode.dmPosition.x, mode.dmPosition.y);
+		out += line;
+	}
+	return out.empty() ? L"none" : out;
 }
 
 bool isDisplayBrokerClient() {
@@ -119,35 +174,49 @@ bool isDisplayBrokerClient() {
 }
 
 bool arrangeInRow(const wchar_t* deviceName, int slot) {
-	// Right edge of the displays on the desktop that aren't SudoVDA virtual displays
-	LONG right = 0;
-	DISPLAY_DEVICEW adapter {};
-	adapter.cb = sizeof(adapter);
-	for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); i++, adapter.cb = sizeof(adapter)) {
-		if (!(adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) || wcsstr(adapter.DeviceString, L"Sudo")) {
-			continue;
-		}
-		DEVMODEW mode {};
-		mode.dmSize = sizeof(mode);
-		if (EnumDisplaySettingsExW(adapter.DeviceName, ENUM_CURRENT_SETTINGS, &mode, 0)) {
-			right = (std::max)(right, mode.dmPosition.x + (LONG) mode.dmPelsWidth);
-		}
-	}
+	std::lock_guard lock(g_configMutex);
 
-	DEVMODEW mode {};
-	mode.dmSize = sizeof(mode);
-	if (!EnumDisplaySettingsExW(deviceName, ENUM_CURRENT_SETTINGS, &mode, 0)) {
+	// Everything through SetDisplayConfig: the legacy ChangeDisplaySettingsEx(nullptr) apply
+	// re-reads the registry and would switch monitors back on that we switched off
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+	if (!activePaths(paths, modes)) {
 		return false;
 	}
-	mode.dmPosition.x = right + slot * (LONG) mode.dmPelsWidth;
-	mode.dmPosition.y = 0;
-	mode.dmFields = DM_POSITION;
-	LONG result = ChangeDisplaySettingsExW(deviceName, &mode, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
-	if (result == DISP_CHANGE_SUCCESSFUL) {
-		result = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+
+	LONG right = 0;
+	DISPLAYCONFIG_SOURCE_MODE* ours = nullptr;
+	for (auto& path : paths) {
+		auto idx = path.sourceInfo.modeInfoIdx;
+		if (idx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID || idx >= modes.size()) {
+			continue;
+		}
+		DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
+		source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+		source.header.size = sizeof(source);
+		source.header.adapterId = path.sourceInfo.adapterId;
+		source.header.id = path.sourceInfo.id;
+		if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS) {
+			continue;
+		}
+		auto& mode = modes[idx].sourceMode;
+		if (_wcsicmp(source.viewGdiDeviceName, deviceName) == 0) {
+			ours = &mode;
+		} else if (!isSudoAdapter(source.viewGdiDeviceName)) {
+			right = (std::max)(right, mode.position.x + (LONG) mode.width);
+		}
 	}
-	wprintf(L"[SUDOVDA] Placed %ls at x=%ld (slot %d): %ld\n", deviceName, mode.dmPosition.x, slot, result);
-	return result == DISP_CHANGE_SUCCESSFUL;
+	if (ours == nullptr) {
+		wprintf(L"[SUDOVDA] Can't place %ls: it isn't on\n", deviceName);
+		return false;
+	}
+
+	ours->position.x = right + slot * (LONG) ours->width;
+	ours->position.y = 0;
+	LONG result = SetDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
+		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
+	wprintf(L"[SUDOVDA] Placed %ls at x=%ld (slot %d): %ld\n", deviceName, ours->position.x, slot, result);
+	return result == ERROR_SUCCESS;
 }
 
 void removeAllVirtualDisplays() {
@@ -166,6 +235,7 @@ void removeAllVirtualDisplays() {
 }
 
 bool keepOnlyVirtualDisplays() {
+	std::lock_guard lock(g_configMutex);
 	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
 	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
 	if (!activePaths(paths, modes)) {
@@ -212,14 +282,19 @@ bool keepOnlyVirtualDisplays() {
 		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
 	printf("[SUDOVDA] Physical displays off (%zu virtual kept): %ld\n", keep.size(), result);
 	if (result == ERROR_SUCCESS) {
+		// Windows may switch the monitors back on when another display arrives; the layout
+		// to restore is the one from before the first time
+		if (!g_physicalDisabled) {
+			g_savedPaths = std::move(saved);
+			g_savedModes = std::move(savedModes);
+		}
 		g_physicalDisabled = true;
-		g_savedPaths = std::move(saved);
-		g_savedModes = std::move(savedModes);
 	}
 	return result == ERROR_SUCCESS;
 }
 
 void restorePhysicalDisplays() {
+	std::lock_guard lock(g_configMutex);
 	if (!g_physicalDisabled) {
 		return;
 	}
@@ -255,7 +330,8 @@ void ensurePhysicalDisplaysOn() {
 	printf("[SUDOVDA] No physical display was on, switched them on: %ld\n", result);
 }
 
-void startDisplayBroker(const std::wstring& pipeName) {
+void startDisplayBroker(const std::wstring& pipeName, bool arrange) {
+	g_brokerArrange = arrange;
 	std::thread([pipeName] {
 		for (;;) {
 			// Local clients only; SYSTEM/admins may write (default pipe security)
@@ -276,9 +352,24 @@ void startDisplayBroker(const std::wstring& pipeName) {
 					request.clientUid[sizeof(request.clientUid) - 1] = 0;
 					request.clientName[sizeof(request.clientName) - 1] = 0;
 					if (request.op == BROKER_ADD) {
+						std::lock_guard lock(g_configMutex);
 						auto name = createVirtualDisplay(request.clientUid, request.clientName,
 							request.width, request.height, request.fps, request.guid);
 						if (!name.empty() && name.size() < CCHDEVICENAME) {
+							// One screen at a time: Windows switches it on, then it takes its place
+							changeDisplaySettings(name.c_str(), request.width, request.height, request.fps);
+							if (!waitForDisplayActive(name.c_str(), 3000)) {
+								wprintf(L"[SUDOVDA] %ls isn't on: extending all displays\n", name.c_str());
+								extendAllDisplays();
+								waitForDisplayActive(name.c_str(), 3000);
+							}
+							if (g_brokerArrange && request.screen >= 2) {
+								arrangeInRow(name.c_str(), (int) request.screen - 1);
+							}
+							if (g_keepPhysicalOff) {
+								keepOnlyVirtualDisplays();
+							}
+							wprintf(L"[SUDOVDA] Displays on: %ls\n", describeDisplays().c_str());
 							wcscpy_s(reply.deviceName, name.c_str());
 							reply.ok = 1;
 						}
@@ -958,6 +1049,7 @@ std::wstring createVirtualDisplay(
 		request.fps = fps;
 		strncpy_s(request.clientUid, s_client_uid, _TRUNCATE);
 		strncpy_s(request.clientName, s_client_name, _TRUNCATE);
+		request.screen = (uint32_t) g_screenIndex;
 		if (!brokerCall(request, reply)) {
 			printf("[SUDOVDA] Display broker couldn't add the virtual display.\n");
 			return std::wstring();
