@@ -6,6 +6,7 @@
 #include <combaseapi.h>
 #include <thread>
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <cmath>
 #include <map>
@@ -42,6 +43,8 @@ namespace {
 	// The extra screen's process that asked for a display through the broker, by GUID: its
 	// display stays while that screen streams, even when the main screen reconnects
 	std::map<std::string, DWORD> g_owners;
+	// The resolution (width, height, refresh in mHz) each display's stream asked for, by GUID
+	std::map<std::string, std::array<int, 3>> g_wantedModes;
 
 	std::string guidKey(const GUID& guid) {
 		return std::string(reinterpret_cast<const char*>(&guid), sizeof(GUID));
@@ -230,6 +233,35 @@ namespace {
 			g_arrangement[s.slot] = {s.side, ranks[s.side]++, std::clamp(s.offset, -0.9, 0.9)};
 		}
 		saveArrangement();
+	}
+
+	/**
+	* Our displays back at the resolution their streams asked for. When another display
+	* arrives, Windows re-applies the resolutions it remembers for that set of displays, which
+	* can put a screen that's already streaming back to an earlier session's resolution (the
+	* stream then shows it scaled). Caller holds g_configMutex.
+	*/
+	void enforceWantedModes() {
+		std::vector<std::pair<std::wstring, std::array<int, 3>>> wanted;
+		{
+			std::lock_guard lock(g_createdMutex);
+			for (auto& [key, name] : g_created) {
+				auto mode = g_wantedModes.find(key);
+				if (mode != g_wantedModes.end()) {
+					wanted.push_back({name, mode->second});
+				}
+			}
+		}
+		for (auto& [name, mode] : wanted) {
+			DEVMODEW current {};
+			current.dmSize = sizeof(current);
+			if (!EnumDisplaySettingsW(name.c_str(), ENUM_CURRENT_SETTINGS, &current) ||
+				((int) current.dmPelsWidth == mode[0] && (int) current.dmPelsHeight == mode[1])) {
+				continue;
+			}
+			wprintf(L"[SUDOVDA] %ls went to %lux%lu: back to %dx%d\n", name.c_str(), current.dmPelsWidth, current.dmPelsHeight, mode[0], mode[1]);
+			changeDisplaySettings(name.c_str(), mode[0], mode[1], mode[2]);
+		}
 	}
 
 	enum : uint32_t { BROKER_ADD = 1, BROKER_REMOVE = 2 };
@@ -638,6 +670,7 @@ void setDisplaySlot(const wchar_t* deviceName, int slot) {
 
 bool layoutRow() {
 	std::lock_guard lock(g_configMutex);
+	enforceWantedModes();
 	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
 	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
 	if (!activePaths(paths, modes)) {
@@ -939,6 +972,8 @@ static void serveBrokerClient(HANDLE pipe) {
 				}
 				if (g_brokerArrange) {
 					layoutRow();
+				} else {
+					enforceWantedModes();
 				}
 				wprintf(L"[SUDOVDA] Screen %u: %ls. Displays on: %ls\n", request.screen, name.c_str(), describeDisplays().c_str());
 				wcscpy_s(reply.deviceName, name.c_str());
@@ -1671,6 +1706,7 @@ std::wstring createVirtualDisplay(
 			bool known = EnumDisplaySettingsW(existing->second.c_str(), ENUM_CURRENT_SETTINGS, &mode) != FALSE;
 			if (!known || (mode.dmPelsWidth == width && mode.dmPelsHeight == height)) {
 				wprintf(L"[SUDOVDA] Virtual display already there: %ls\n", existing->second.c_str());
+				g_wantedModes[guidKey(guid)] = {(int) width, (int) height, (int) fps};
 				return existing->second;
 			}
 			wprintf(L"[SUDOVDA] %ls is %lux%lu, %ux%u asked: replacing it\n", existing->second.c_str(),
@@ -1731,6 +1767,7 @@ std::wstring createVirtualDisplay(
 	{
 		std::lock_guard lock(g_createdMutex);
 		g_created[guidKey(guid)] = deviceName;
+		g_wantedModes[guidKey(guid)] = {(int) width, (int) height, (int) fps};
 	}
 
 	return std::wstring(deviceName);
@@ -1765,6 +1802,7 @@ bool removeVirtualDisplay(const GUID& guid) {
 			g_created.erase(created);
 		}
 		g_owners.erase(guidKey(guid));
+		g_wantedModes.erase(guidKey(guid));
 		noneLeft = g_created.empty();
 	}
 	if (!removedName.empty()) {
