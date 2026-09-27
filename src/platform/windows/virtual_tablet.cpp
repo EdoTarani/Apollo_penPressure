@@ -1,13 +1,18 @@
 /**
  * @file src/platform/windows/virtual_tablet.cpp
- * @brief Built-in virtual Wacom tablet (Cintiq 22) presented to Windows over USB/IP.
+ * @brief Built-in virtual Wacom tablet (Intuos Pro M or Cintiq 22) presented to Windows over USB/IP.
  *
- * The tablet is a USB/IP server on 127.0.0.1 that answers exactly like a Wacom Cintiq 22:
- * captured descriptors, the Wacom driver's feature-report handshake answered with the real
- * device's replies, and pen state encoded as the device's native report 0x10 (or the generic
- * report 0x06 until the driver switches the tablet to its native mode). usbip-win2 attaches it,
- * the real Wacom driver binds, and applications get full pressure, tilt, buttons, hover and
- * Wintab. Port of vwacom.py.
+ * The tablet is a USB/IP server on 127.0.0.1 that answers like a real Wacom: its descriptors,
+ * the Wacom driver's feature-report handshake, and pen state encoded as the device's native
+ * report (or the generic report 6 until the driver switches the tablet to its native mode).
+ * usbip-win2 attaches it, the real Wacom driver binds, and applications get full pressure,
+ * tilt, buttons, hover and Wintab. Port of vwacom.py.
+ *
+ * - Intuos Pro M (3rd gen, PTK-670; the default): a pen tablet, so the Wacom driver maps it to
+ *   the whole desktop (every screen) with no setup, and it never pairs with, or shares settings
+ *   with, a real Cintiq on the same PC. Descriptors from the public linuxwacom recording.
+ * - Cintiq 22: a pen display, captured from the real device. Wacom ties it to one monitor
+ *   (or All displays) and pairs it with a real Cintiq 22's screen if there is one.
  */
 // platform includes
 #include <winsock2.h>  // must precede Windows.h
@@ -36,6 +41,7 @@
 #include "src/logging.h"
 #include "virtual_tablet.h"
 #include "virtual_tablet_descriptors.h"
+#include "virtual_tablet_descriptors_intuos.h"
 
 namespace platf::virtual_tablet {
   using namespace std::literals;
@@ -55,9 +61,18 @@ namespace platf::virtual_tablet {
     // ---------------------------------------------------------------- the tablet
     constexpr int X_MAX = 96012, Y_MAX = 54358, P_MAX = 8191, DIST_MAX = 63;  // report 0x10
     constexpr int X_MAX_GENERIC = 32767, Y_MAX_GENERIC = 32767, P_MAX_GENERIC = 2047;  // report 0x06
-    constexpr uint32_t PEN_SERIAL_LO = 0x97800A01, PEN_SERIAL_HI = 0x00100842;  // Pro Pen 2
+    // A Pro Pen 2 of its own: the captured pen's serial (0x97800A01) made the Wacom driver ignore
+    // the virtual pen once the real pen had been on a real tablet
+    constexpr uint32_t PEN_SERIAL_LO = 0x5157A0D1, PEN_SERIAL_HI = 0x00100842;
     constexpr uint16_t TOOL_PRO_PEN2 = 0x0842, TOOL_PRO_PEN2_ERASER = 0x084A;
     constexpr const char *SERIAL = "9GQ00Y1003861";
+
+    // Intuos Pro M (3rd gen): report 30 (native) and report 6 (generic) ranges. The Wacom driver
+    // maps the active area 397 counts inside each edge to the whole desktop (measured).
+    constexpr int IPM_X_MAX = 52600, IPM_Y_MAX = 29600, IPM_P_MAX = 8191, IPM_DIST_MAX = 255, IPM_MARGIN = 397;
+    constexpr int IPM_X_MAX_GENERIC = 26300, IPM_Y_MAX_GENERIC = 14800, IPM_P_MAX_GENERIC = 4095;
+    constexpr const char *IPM_SERIAL = "4HHS1K1000713";
+    constexpr uint8_t PEN_BUTTON_TERTIARY = 0x04;  // LI_PEN_BUTTON_TERTIARY
     constexpr size_t MAX_QUEUED_REPORTS = 16;  // motion is merged, so this only holds state changes
 
     // ---------------------------------------------------------------- byte helpers
@@ -236,6 +251,74 @@ namespace platf::virtual_tablet {
         return r;
       }
 
+      // ---------------------------------------------------------- Intuos Pro M
+      /// Tip, 3 side switches, eraser, invert, in range (+ sense, report 30 only)
+      uint8_t ipm_flags() const {
+        uint8_t f = 0;
+        if (in_range) {
+          f |= 0x40;  // in range
+          if (tool == LI_TOOL_TYPE_ERASER) {
+            f |= 0x20;  // invert
+            if (tip) {
+              f |= 0x10;  // eraser contact
+            }
+          } else if (tip) {
+            f |= 0x01;  // tip
+          }
+          if (buttons & LI_PEN_BUTTON_PRIMARY) {
+            f |= 0x02;
+          }
+          if (buttons & LI_PEN_BUTTON_SECONDARY) {
+            f |= 0x04;
+          }
+          if (buttons & PEN_BUTTON_TERTIARY) {
+            f |= 0x08;
+          }
+        }
+        return f;
+      }
+
+      /// Native report 30 (after the driver sets DataMode 2), 34 bytes. The sense bit stays set and
+      /// the pen's identity stays in the report when it leaves: without them Wacom_Tablet.exe
+      /// crashed or ignored the tablet afterwards. Scan time: real time in 100 us units.
+      std::vector<uint8_t> report30(uint16_t scan_time, uint16_t seq) const {
+        std::vector<uint8_t> r;
+        put8(r, 0x1E);
+        put8(r, in_range ? 1 : 0);  // contact count
+        put8(r, ipm_flags() | 0x80);  // + sense
+        put24le(r, (uint32_t) (IPM_MARGIN + x * (IPM_X_MAX - 2 * IPM_MARGIN)));
+        put24le(r, (uint32_t) (IPM_MARGIN + y * (IPM_Y_MAX - 2 * IPM_MARGIN)));
+        put16le(r, tip ? (uint16_t) (pressure * IPM_P_MAX) : 0);
+        put16le(r, (uint16_t) (int16_t) std::clamp(tilt_x, -90, 90));
+        put16le(r, (uint16_t) (int16_t) std::clamp(tilt_y, -90, 90));
+        put16le(r, 0);  // twist
+        put16le(r, 0);
+        put8(r, tip ? 0 : in_range ? (uint8_t) (distance * IPM_DIST_MAX) : IPM_DIST_MAX);
+        put32le(r, PEN_SERIAL_LO);
+        put32le(r, PEN_SERIAL_HI);
+        put16le(r, tool == LI_TOOL_TYPE_ERASER ? TOOL_PRO_PEN2_ERASER : TOOL_PRO_PEN2);
+        put16le(r, scan_time);
+        put16le(r, seq);
+        return r;
+      }
+
+      /// Generic HID pen report 6 (before the driver switches modes), 18 bytes
+      std::vector<uint8_t> report06_ipm(uint16_t scan_time, uint16_t seq) const {
+        std::vector<uint8_t> r;
+        put8(r, 0x06);
+        put8(r, in_range ? 1 : 0);
+        put8(r, ipm_flags() & 0x7F);
+        put16le(r, (uint16_t) (x * IPM_X_MAX_GENERIC));
+        put16le(r, (uint16_t) (y * IPM_Y_MAX_GENERIC));
+        put16le(r, tip ? (uint16_t) (pressure * IPM_P_MAX_GENERIC) : 0);
+        put16le(r, (uint16_t) (int16_t) std::clamp(tilt_x * 100, -9000, 9000));
+        put16le(r, (uint16_t) (int16_t) std::clamp(tilt_y * 100, -9000, 9000));
+        put8(r, tip ? 0 : in_range ? (uint8_t) (distance * IPM_DIST_MAX) : IPM_DIST_MAX);
+        put16le(r, scan_time);
+        put16le(r, seq);
+        return r;
+      }
+
       /// Generic HID pen report the tablet sends before the Wacom driver switches modes
       std::vector<uint8_t> report06() const {
         std::vector<uint8_t> r;
@@ -269,6 +352,7 @@ namespace platf::virtual_tablet {
       SOCKET sock = INVALID_SOCKET;
       std::mutex send_mutex;
       std::deque<urb_t> pending_in;  // interrupt-IN URBs waiting for a report (guarded by g_mutex)
+      std::deque<urb_t> pending_other;  // IN URBs on other endpoints: never completed, until unlinked
       bool alive = true;  // guarded by g_mutex
     };
 
@@ -279,6 +363,54 @@ namespace platf::virtual_tablet {
     std::shared_ptr<session_t> g_session;
     uint8_t g_data_mode = 1;
     std::map<uint8_t, std::vector<uint8_t>> g_features;
+    bool g_intuos = true;  ///< Intuos Pro M (default) or Cintiq 22, from config at start()
+    uint16_t g_report_seq = 0;
+    std::thread g_battery_thread;
+
+    // The model's descriptors
+    struct model_t {
+      const uint8_t *device;
+      size_t device_size;
+      const uint8_t *config;
+      size_t config_size;
+      const uint8_t *manufacturer;
+      size_t manufacturer_size;
+      const uint8_t *product;
+      size_t product_size;
+      const char *serial;
+      const char *name;
+    };
+
+    model_t model() {
+      if (g_intuos) {
+        namespace d = descriptors_intuos;
+        return {d::device, sizeof(d::device), d::config, sizeof(d::config), d::string_manufacturer, sizeof(d::string_manufacturer),
+                d::string_product, sizeof(d::string_product), IPM_SERIAL, "Wacom Intuos Pro M"};
+      }
+      namespace d = descriptors;
+      return {d::device, sizeof(d::device), d::config, sizeof(d::config), d::string_manufacturer, sizeof(d::string_manufacturer),
+              d::string_product, sizeof(d::string_product), SERIAL, "Wacom Cintiq 22"};
+    }
+
+    /// The HID report descriptor of an interface (nullptr: none)
+    const uint8_t *hid_report_descriptor(uint16_t iface, size_t &size) {
+      if (g_intuos) {
+        if (iface == 0) {
+          size = sizeof(descriptors_intuos::hid_report_if0);
+          return descriptors_intuos::hid_report_if0;
+        }
+        if (iface == 2) {
+          size = sizeof(descriptors_intuos::hid_report_if2);
+          return descriptors_intuos::hid_report_if2;
+        }
+        return nullptr;
+      }
+      if (iface == 0) {
+        size = sizeof(descriptors::hid_report);
+        return descriptors::hid_report;
+      }
+      return nullptr;
+    }
 
     std::atomic<bool> g_running {false};
     std::atomic<bool> g_stopping {false};
@@ -296,9 +428,10 @@ namespace platf::virtual_tablet {
     }
 
     void reset_features() {
+      const char *serial = model().serial;
       std::vector<uint8_t> serial_report {0x14};
       for (size_t i = 0; i < 13; i++) {
-        serial_report.push_back(i < std::strlen(SERIAL) ? SERIAL[i] : 0);
+        serial_report.push_back(i < std::strlen(serial) ? serial[i] : 0);
       }
       // The Wacom driver's reads, answered as the real Cintiq 22 did
       g_features = {
@@ -360,16 +493,44 @@ namespace platf::virtual_tablet {
       }
     }
 
+    /// The Intuos reports' scan time: real time in 100 us units
+    uint16_t scan_time_now() {
+      auto now = std::chrono::steady_clock::now().time_since_epoch();
+      return (uint16_t) (std::chrono::duration_cast<std::chrono::microseconds>(now).count() / 100);
+    }
+
+    /// The pen report for the mode the Wacom driver put the tablet in (caller holds g_mutex)
+    std::vector<uint8_t> current_report_locked() {
+      if (g_intuos) {
+        g_report_seq++;
+        return g_data_mode == 2 ? g_pen.report30(scan_time_now(), g_report_seq) : g_pen.report06_ipm(scan_time_now(), g_report_seq);
+      }
+      return g_data_mode == 2 ? g_pen.report10() : g_pen.report06();
+    }
+
+    /**
+     * An Intuos Pro reports its pad (ExpressKeys, dial buttons, dials) and its battery: the
+     * Wacom driver builds its pad state from them, and without it Wacom_Tablet.exe crashed (null
+     * object) when the pointer switched between the pen and the mouse. "Nothing pressed, battery
+     * full", whenever the driver (re)initializes the tablet. Caller holds g_mutex.
+     */
+    void queue_pad_state_locked() {
+      g_reports.push_back({0x11, 0, 0, 0, 0, 0, 0, 0, 0});  // report 17: pad idle
+      g_reports.push_back({0x13, 100 | 0x80, 0, 0, 0, 0, 0, 0, 0});  // report 19: 100 %, powered
+      g_cv.notify_all();
+    }
+
     void queue_report_locked() {
-      auto report = g_data_mode == 2 ? g_pen.report10() : g_pen.report06();
+      auto report = current_report_locked();
 
       // If the host fell behind, the newest position is all that matters: replace a queued
       // report that differs only in motion (same report ID and tip/button/eraser/range flags)
       // instead of lining up stale positions. Presses, releases and button changes always
       // get their own report, so nothing is lost; when the host keeps up this never triggers.
+      size_t key = g_intuos ? 3 : 2;  // report ID (+ contact count) + flags
       if (!g_reports.empty()) {
         auto &last = g_reports.back();
-        if (last.size() == report.size() && last.size() > 1 && last[0] == report[0] && last[1] == report[1]) {
+        if (last.size() == report.size() && last.size() >= key && std::equal(last.begin(), last.begin() + key, report.begin())) {
           last = std::move(report);
           g_stats.merged++;
           g_cv.notify_all();
@@ -388,7 +549,8 @@ namespace platf::virtual_tablet {
     /// Returns the URB status (0, or EPIPE_STATUS for a STALL) and fills `in` for IN transfers
     int32_t control(const uint8_t *setup, const std::vector<uint8_t> &out, std::vector<uint8_t> &in) {
       uint8_t bm_request_type = setup[0], b_request = setup[1];
-      uint16_t w_value = get16le(setup + 2), w_length = get16le(setup + 6);
+      uint16_t w_value = get16le(setup + 2), w_index = get16le(setup + 4), w_length = get16le(setup + 6);
+      auto m = model();
       int type = (bm_request_type >> 5) & 3;
 
       auto reply = [&](const uint8_t *data, size_t size) {
@@ -402,22 +564,24 @@ namespace platf::virtual_tablet {
             {
               uint8_t dtype = w_value >> 8, index = w_value & 0xFF;
               if (dtype == 0x01) {
-                return reply(descriptors::device, sizeof(descriptors::device));
+                return reply(m.device, m.device_size);
               }
               if (dtype == 0x02) {
-                return reply(descriptors::config, sizeof(descriptors::config));
+                return reply(m.config, m.config_size);
               }
               if (dtype == 0x22) {
-                return reply(descriptors::hid_report, sizeof(descriptors::hid_report));
+                size_t size = 0;
+                auto report = hid_report_descriptor(w_index, size);
+                return report ? reply(report, size) : EPIPE_STATUS;
               }
               if (dtype == 0x21) {
-                // The 9-byte HID descriptor inside the configuration descriptor
-                for (size_t i = 0; i + 1 < sizeof(descriptors::config); i += descriptors::config[i]) {
-                  if (descriptors::config[i + 1] == 0x21) {
-                    return reply(descriptors::config + i, descriptors::config[i]);
-                  }
-                  if (descriptors::config[i] == 0) {
-                    break;
+                // The 9-byte HID descriptor of interface w_index, inside the configuration descriptor
+                int iface = -1;
+                for (size_t i = 0; i + 1 < m.config_size && m.config[i] != 0; i += m.config[i]) {
+                  if (m.config[i + 1] == 0x04) {
+                    iface = m.config[i + 2];
+                  } else if (m.config[i + 1] == 0x21 && iface == w_index) {
+                    return reply(m.config + i, m.config[i]);
                   }
                 }
                 return EPIPE_STATUS;
@@ -428,13 +592,13 @@ namespace platf::virtual_tablet {
                   return reply(langids, sizeof(langids));
                 }
                 if (index == 1) {
-                  return reply(descriptors::string_manufacturer, sizeof(descriptors::string_manufacturer));
+                  return reply(m.manufacturer, m.manufacturer_size);
                 }
                 if (index == 2) {
-                  return reply(descriptors::string_product, sizeof(descriptors::string_product));
+                  return reply(m.product, m.product_size);
                 }
                 if (index == 3) {
-                  auto s = string_descriptor(SERIAL);
+                  auto s = string_descriptor(m.serial);
                   return reply(s.data(), s.size());
                 }
               }
@@ -467,6 +631,10 @@ namespace platf::virtual_tablet {
 
       if (type == 1) {  // HID class
         uint8_t report_type = w_value >> 8, report_id = w_value & 0xFF;
+        if (w_index != 0) {
+          // The Intuos Pro's second HID interface: nothing to report
+          return (b_request == 0x0A || b_request == 0x0B || b_request == 0x09) ? 0 : EPIPE_STATUS;
+        }
         switch (b_request) {
           case 0x0A:  // SET_IDLE
           case 0x0B:  // SET_PROTOCOL
@@ -496,8 +664,16 @@ namespace platf::virtual_tablet {
                 }
                 g_data_mode = out[1];
                 g_features[0x02] = {0x02, g_data_mode};
-              } else if (g_features.find(report_id) == g_features.end()) {
-                g_features[report_id] = out;
+                if (g_intuos && g_data_mode == 2) {
+                  queue_pad_state_locked();
+                }
+              } else {
+                if (g_features.find(report_id) == g_features.end()) {
+                  g_features[report_id] = out;
+                }
+                if (report_id == 0x04 && g_intuos) {
+                  queue_pad_state_locked();  // a (re)starting driver sets 0x04 first
+                }
               }
               return 0;
             }
@@ -512,8 +688,22 @@ namespace platf::virtual_tablet {
                 in.assign(it->second.begin(), it->second.begin() + std::min<size_t>(it->second.size(), w_length));
                 return 0;
               }
-              if (report_type == 1 && (report_id == 0x10 || report_id == 0x06)) {
-                auto r = report_id == 0x10 ? g_pen.report10() : g_pen.report06();
+              if (report_type == 1) {
+                std::vector<uint8_t> r;
+                if (g_intuos) {
+                  if (report_id == 0x1E) {
+                    r = g_pen.report30(scan_time_now(), g_report_seq);
+                  } else if (report_id == 0x06) {
+                    r = g_pen.report06_ipm(scan_time_now(), g_report_seq);
+                  }
+                } else if (report_id == 0x10) {
+                  r = g_pen.report10();
+                } else if (report_id == 0x06) {
+                  r = g_pen.report06();
+                }
+                if (r.empty()) {
+                  return EPIPE_STATUS;
+                }
                 in.assign(r.begin(), r.begin() + std::min<size_t>(r.size(), w_length));
                 return 0;
               }
@@ -529,7 +719,8 @@ namespace platf::virtual_tablet {
 
     // ---------------------------------------------------------------- USB/IP session
     std::vector<uint8_t> usb_device_record() {
-      const uint8_t *dev = descriptors::device;
+      auto m = model();
+      const uint8_t *dev = m.device;
       std::vector<uint8_t> v;
       std::string path = "/sys/devices/pci0000:00/0000:00:1d.0/usb1/1-1";
       v.insert(v.end(), path.begin(), path.end());
@@ -548,11 +739,11 @@ namespace platf::virtual_tablet {
       put8(v, dev[6]);
       put8(v, 1);  // bConfigurationValue
       put8(v, dev[17]);  // bNumConfigurations
-      put8(v, 1);  // bNumInterfaces
+      put8(v, m.config[4]);  // bNumInterfaces
       return v;
     }
 
-    void send_ret_submit(session_t &s, uint32_t seqnum, uint32_t devid, uint32_t direction, uint32_t ep, int32_t status, const std::vector<uint8_t> &data) {
+    void send_ret_submit(session_t &s, uint32_t seqnum, uint32_t devid, uint32_t direction, uint32_t ep, int32_t status, const std::vector<uint8_t> &data, int64_t actual = -1) {
       std::vector<uint8_t> v;
       put32be(v, RET_SUBMIT);
       put32be(v, seqnum);
@@ -560,7 +751,7 @@ namespace platf::virtual_tablet {
       put32be(v, direction);
       put32be(v, ep);
       put32be(v, (uint32_t) status);
-      put32be(v, (uint32_t) data.size());
+      put32be(v, (uint32_t) (actual >= 0 ? actual : (int64_t) data.size()));
       put32be(v, 0);
       put32be(v, 0);
       put32be(v, 0);
@@ -622,6 +813,12 @@ namespace platf::virtual_tablet {
             std::lock_guard lg(g_mutex);
             s->pending_in.push_back({seqnum, devid, buflen});
             g_cv.notify_all();
+          } else if (g_intuos && direction == DIR_IN) {
+            // The Intuos Pro's second HID interface: nothing to report, the URB waits until unlinked
+            std::lock_guard lg(g_mutex);
+            s->pending_other.push_back({seqnum, devid, buflen});
+          } else if (g_intuos && direction == DIR_OUT) {
+            send_ret_submit(*s, seqnum, devid, direction, ep, 0, {}, (int64_t) out.size());  // vendor bulk OUT: accepted
           } else {
             send_ret_submit(*s, seqnum, devid, direction, ep, EPIPE_STATUS, {});
           }
@@ -630,12 +827,14 @@ namespace platf::virtual_tablet {
           int32_t status = 0;
           {
             std::lock_guard lg(g_mutex);
-            auto it = std::find_if(s->pending_in.begin(), s->pending_in.end(), [&](const urb_t &u) {
-              return u.seqnum == target;
-            });
-            if (it != s->pending_in.end()) {
-              s->pending_in.erase(it);
-              status = ECONNRESET_STATUS;
+            for (auto *pending : {&s->pending_in, &s->pending_other}) {
+              auto it = std::find_if(pending->begin(), pending->end(), [&](const urb_t &u) {
+                return u.seqnum == target;
+              });
+              if (it != pending->end()) {
+                pending->erase(it);
+                status = ECONNRESET_STATUS;
+              }
             }
           }
           std::vector<uint8_t> v;
@@ -679,11 +878,16 @@ namespace platf::virtual_tablet {
         put32be(v, 1);
         auto dev = usb_device_record();
         v.insert(v.end(), dev.begin(), dev.end());
-        // Interface: class/subclass/protocol from the interface descriptor inside the config
-        put8(v, descriptors::config[9 + 5]);
-        put8(v, descriptors::config[9 + 6]);
-        put8(v, descriptors::config[9 + 7]);
-        put8(v, 0);
+        // Interfaces: class/subclass/protocol of each interface descriptor inside the config
+        auto m = model();
+        for (size_t i = 0; i + 1 < m.config_size && m.config[i] != 0; i += m.config[i]) {
+          if (m.config[i + 1] == 0x04) {
+            put8(v, m.config[i + 5]);
+            put8(v, m.config[i + 6]);
+            put8(v, m.config[i + 7]);
+            put8(v, 0);
+          }
+        }
         send_all(c, v);
         ::closesocket(c);
         return;
@@ -720,7 +924,7 @@ namespace platf::virtual_tablet {
           g_reports.clear();
           reset_features();
         }
-        BOOST_LOG(info) << "Virtual tablet: attached (Wacom Cintiq 22, serial "sv << SERIAL << ')';
+        BOOST_LOG(info) << "Virtual tablet: attached ("sv << model().name << ", serial "sv << model().serial << ')';
         if (send_all(c, v)) {
           run_session(s);
         } else {
@@ -942,6 +1146,7 @@ namespace platf::virtual_tablet {
       return;
     }
     g_stopping = false;
+    g_intuos = config::input.pen_virtual_tablet_model != "cintiq";
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -980,7 +1185,20 @@ namespace platf::virtual_tablet {
       }
     }
 
-    BOOST_LOG(info) << "Virtual tablet: serving Wacom Cintiq 22 on 127.0.0.1:"sv << USBIP_TCP_PORT;
+    BOOST_LOG(info) << "Virtual tablet: serving "sv << model().name << " on 127.0.0.1:"sv << USBIP_TCP_PORT;
+
+    // An Intuos Pro repeats its battery status (every 10 s here, while the pen is away)
+    g_battery_thread = std::thread([] {
+      for (int tick = 1; !g_stopping; ++tick) {
+        std::this_thread::sleep_for(1s);
+        std::lock_guard lg(g_mutex);
+        if (g_intuos && tick % 10 == 0 && g_data_mode == 2 && !g_pen.in_range && g_session && g_session->alive &&
+            g_reports.size() < MAX_QUEUED_REPORTS) {
+          g_reports.push_back({0x13, 100 | 0x80, 0, 0, 0, 0, 0, 0, 0});
+          g_cv.notify_all();
+        }
+      }
+    });
     // Unplugged until a stream starts (also removes one left plugged in by a previous run:
     // usbip-win2 reconnects that one by itself a few seconds after we start, so look again)
     g_want_plugged = false;
@@ -1019,6 +1237,9 @@ namespace platf::virtual_tablet {
     }
     if (g_udp_thread.joinable()) {
       g_udp_thread.join();
+    }
+    if (g_battery_thread.joinable()) {
+      g_battery_thread.join();
     }
     g_running = false;
   }

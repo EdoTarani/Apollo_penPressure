@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/virtual_tablet.h
- * @brief Built-in virtual Wacom tablet (Cintiq 22) presented to Windows over USB/IP.
+ * @brief Built-in virtual Wacom tablet (Intuos Pro M or Cintiq 22) presented to Windows over USB/IP.
  */
 #pragma once
 
@@ -9,9 +9,9 @@
 namespace platf::virtual_tablet {
   /**
    * @brief Start the virtual tablet and plug it into Windows.
-   * @details Serves a USB/IP device on 127.0.0.1 that is byte-for-byte a Wacom Cintiq 22
-   * (descriptors and the Wacom driver's handshake answers captured from real hardware), then
-   * attaches it with usbip-win2 so the real Wacom driver binds to it. Also listens on
+   * @details Serves a USB/IP device on 127.0.0.1 that answers like a Wacom Intuos Pro M (the
+   * default) or Cintiq 22 (pen_virtual_tablet_model; descriptors from real hardware), which
+   * usbip-win2 attaches while a stream runs so the real Wacom driver binds to it. Also listens on
    * udp 127.0.0.1:pen_virtual_tablet_port for pen events from other Apollo instances.
    * Safe to call more than once.
    */

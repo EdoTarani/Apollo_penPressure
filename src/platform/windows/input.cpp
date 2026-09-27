@@ -1156,8 +1156,8 @@ namespace platf {
    * @param pen The pen event.
    */
   /**
-   * With extra screens, only the chosen screen's pen goes to the virtual Cintiq: Wacom ties a
-   * pen display to one monitor. The other screens use the Windows Ink pen.
+   * With extra screens, the chosen screen's pen (or every screen's) goes to the virtual tablet.
+   * The other screens use the Windows Ink pen.
    */
   static bool pen_goes_to_virtual_tablet() {
     int screen = config::nvhttp.extra_screen_index > 0 ? config::nvhttp.extra_screen_index : 1;

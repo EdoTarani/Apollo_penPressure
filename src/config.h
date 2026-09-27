@@ -223,6 +223,7 @@ namespace config {
     int pen_virtual_tablet_port;
     bool pen_virtual_tablet_desktop;  ///< Send positions relative to the whole desktop (one tablet for all screens)
     bool pen_virtual_tablet_host;  ///< This instance serves the built-in tablet (false: forward to the one that does)
+    std::string pen_virtual_tablet_model;  ///< "intuos" (Intuos Pro M: all screens, no pairing with a real Cintiq) or "cintiq" (Cintiq 22)
     int pen_virtual_tablet_screen;  ///< With extra screens: 0 = every screen's pen goes to the virtual tablet, 1..3 = only that screen's (the others use Windows Ink)
 
     bool enable_input_only_mode;

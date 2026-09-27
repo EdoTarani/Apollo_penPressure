@@ -141,9 +141,8 @@ namespace platf::extra_screens {
       out << "stream_audio = disabled\n";  // only the main screen plays sound
       out << "system_tray = disabled\n";
       out << "extra_screens = 0\n";
-      // The virtual Cintiq is a pen display: Wacom ties it to one monitor, the chosen screen's.
-      // That screen forwards its pen to our tablet (positions relative to its own display); the
-      // others use a Windows Ink pen.
+      // The chosen screen (or every screen) forwards its pen to the tablet in the main instance,
+      // as positions on the whole desktop; the others use a Windows Ink pen.
       int tablet_screen = config::input.pen_virtual_tablet_screen <= config::nvhttp.extra_screens + 1 ? config::input.pen_virtual_tablet_screen : 1;  // 0 = all
       out << "pen_virtual_tablet = " << (config::input.pen_virtual_tablet ? "enabled" : "disabled") << '\n';
       out << "pen_virtual_tablet_host = disabled\n";
@@ -314,9 +313,9 @@ namespace platf::extra_screens {
     VDISPLAY::startDisplayBroker(platf::from_utf8(broker_pipe_utf8()),
                                  config::nvhttp.extra_screens_arrange && !config::video.isolated_virtual_display_option);
 
-    // Pen positions on the whole desktop, with the virtual Cintiq set to "All displays" in the
-    // Wacom settings: that mapping doesn't depend on which (virtual) monitor is which, which
-    // changes between connections
+    // Pen positions on the whole desktop, where the Wacom driver maps the virtual Intuos (or the
+    // Cintiq, set to "All displays"): that mapping doesn't depend on which (virtual) monitor is
+    // which, which changes between connections
     config::input.pen_virtual_tablet_desktop = true;
 
     g_job = CreateJobObjectW(nullptr, nullptr);

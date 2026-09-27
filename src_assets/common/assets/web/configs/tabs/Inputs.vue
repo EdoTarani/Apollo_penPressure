@@ -186,6 +186,16 @@ const config = ref(props.config)
               default="false"
     ></Checkbox>
 
+    <!-- Which tablet the virtual Wacom is -->
+    <div class="mb-3" v-if="platform === 'windows' && config.pen_virtual_tablet === 'enabled'">
+      <label for="pen_virtual_tablet_model" class="form-label">{{ $t('config.pen_virtual_tablet_model') }}</label>
+      <select id="pen_virtual_tablet_model" class="form-select" v-model="config.pen_virtual_tablet_model">
+        <option value="intuos">Wacom Intuos Pro M</option>
+        <option value="cintiq">Wacom Cintiq 22</option>
+      </select>
+      <div class="form-text">{{ $t('config.pen_virtual_tablet_model_desc') }}</div>
+    </div>
+
     <!-- With extra screens: which screen gets the virtual Wacom -->
     <div class="mb-3" v-if="platform === 'windows' && config.pen_virtual_tablet === 'enabled' && config.extra_screens > 0">
       <label for="pen_virtual_tablet_screen" class="form-label">{{ $t('config.pen_virtual_tablet_screen') }}</label>
