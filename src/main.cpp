@@ -180,6 +180,9 @@ int main(int argc, char *argv[]) {
   if (!config::nvhttp.vdisplay_broker.empty()) {
     VDISPLAY::useDisplayBroker(platf::from_utf8(config::nvhttp.vdisplay_broker), config::nvhttp.extra_screen_index);
     BOOST_LOG(info) << "Virtual displays via the main instance: "sv << config::nvhttp.vdisplay_broker;
+  } else {
+    // How the user arranged the screens, for the next streams
+    VDISPLAY::setArrangementFile((platf::appdata() / "virtual_screens_arrangement.txt").wstring());
   }
 #endif
 

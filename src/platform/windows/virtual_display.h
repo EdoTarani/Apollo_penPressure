@@ -72,6 +72,11 @@ namespace VDISPLAY {
 	// Remove every virtual display this process created (the extra screens' too)
 	void removeAllVirtualDisplays();
 
+	// Remove the extra screens' displays whose screen process is gone (the others belong to
+	// screens still streaming); how many virtual displays this process holds
+	void removeOrphanedVirtualDisplays();
+	size_t virtualDisplayCount();
+
 	// Remember the monitors' layout before a stream adds its first virtual display (Windows may
 	// apply a remembered layout for "monitors + virtual display" with some monitors off, and
 	// that must not become the layout to put back); restorePhysicalDisplays() puts it back
@@ -88,6 +93,9 @@ namespace VDISPLAY {
 
 	// Which screen a virtual display belongs to (0 = screen 1), for layoutRow()
 	void setDisplaySlot(const wchar_t* deviceName, int slot);
+
+	// Where the screens' arrangement (as the user last had it) is kept between streams
+	void setArrangementFile(const std::wstring& path);
 
 	// All virtual displays in a row by screen: screen 1 at 0,0 (the main display), then 2, 3;
 	// monitors that are on keep their layout, left of screen 1. restorePhysicalDisplays() undoes it.

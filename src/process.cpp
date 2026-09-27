@@ -865,10 +865,14 @@ namespace proc {
       }
 
       if (config::nvhttp.extra_screen_index == 0) {
-        // The extra screens' displays (created through our broker), then the monitors back on
-        VDISPLAY::setKeepPhysicalOff(false);
-        VDISPLAY::removeAllVirtualDisplays();
-        VDISPLAY::restorePhysicalDisplays();
+        // The extra screens' displays belong to their own sessions: a screen still streaming
+        // keeps its display (only this one reconnects, e.g. for a new resolution); those whose
+        // process is gone go. The monitors come back with the last virtual display.
+        VDISPLAY::removeOrphanedVirtualDisplays();
+        if (VDISPLAY::virtualDisplayCount() == 0) {
+          VDISPLAY::setKeepPhysicalOff(false);
+          VDISPLAY::restorePhysicalDisplays();
+        }
       }
     }
 

@@ -7,6 +7,7 @@
 #include <thread>
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <map>
 #include <mutex>
 
@@ -38,6 +39,9 @@ namespace {
 	// creates the extra screens' displays up front; their own requests then just find them)
 	std::mutex g_createdMutex;
 	std::map<std::string, std::wstring> g_created;
+	// The extra screen's process that asked for a display through the broker, by GUID: its
+	// display stays while that screen streams, even when the main screen reconnects
+	std::map<std::string, DWORD> g_owners;
 
 	std::string guidKey(const GUID& guid) {
 		return std::string(reinterpret_cast<const char*>(&guid), sizeof(GUID));
@@ -53,6 +57,19 @@ namespace {
 
 	// Screen of each virtual display (0 = screen 1), for the row layout
 	std::map<std::wstring, int> g_slots;
+
+	// How the user arranged the virtual screens (display settings), kept for the next streams: per
+	// screen (slot 1, 2 = screens 2, 3) the side of screen 1 it's on ('R', 'L', 'B', 'T'), its
+	// order on that side, and its offset along screen 1's edge as a fraction of screen 1's size,
+	// so it holds when the resolutions change
+	struct Placement {
+		char side = 'R';
+		int rank = 0;
+		double offset = 0;
+	};
+	std::map<int, Placement> g_arrangement;
+	std::wstring g_arrangementFile;
+	size_t g_peakScreens = 0;  // most of our displays on at once in this stream: a full arrangement
 
 	// The physical monitors' exact layout before they were switched off, to put back
 	std::vector<DISPLAYCONFIG_PATH_INFO> g_savedPaths;
@@ -135,6 +152,86 @@ namespace {
 		return true;
 	}
 
+	void saveArrangement() {
+		if (g_arrangementFile.empty()) {
+			return;
+		}
+		FILE* file = _wfopen(g_arrangementFile.c_str(), L"w");
+		if (file == nullptr) {
+			return;
+		}
+		for (auto& [slot, placement] : g_arrangement) {
+			fprintf(file, "%d %c %d %.4f\n", slot, placement.side, placement.rank, placement.offset);
+		}
+		fclose(file);
+	}
+
+	/// Our virtual displays that are on, by screen slot: their desktop rectangles (caller holds g_configMutex)
+	std::map<int, RECT> slottedDisplays() {
+		std::map<int, RECT> result;
+		std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+		std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+		if (!activePaths(paths, modes)) {
+			return result;
+		}
+		for (auto& path : paths) {
+			auto idx = path.sourceInfo.modeInfoIdx;
+			if (idx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID || idx >= modes.size()) {
+				continue;
+			}
+			auto name = sourceName(path);
+			auto slot = g_slots.find(name);
+			if (slot == g_slots.end() || !isSudoAdapter(name.c_str())) {
+				continue;
+			}
+			auto& mode = modes[idx].sourceMode;
+			result[slot->second] = {mode.position.x, mode.position.y, mode.position.x + (LONG) mode.width, mode.position.y + (LONG) mode.height};
+		}
+		return result;
+	}
+
+	/**
+	* Remember how the screens are arranged now (the user may have moved them in the display
+	* settings), before one of them goes. Only a full arrangement: all the screens this stream
+	* had, with screen 1. Caller holds g_configMutex.
+	*/
+	void captureArrangement() {
+		auto screens = slottedDisplays();
+		g_peakScreens = (std::max)(g_peakScreens, screens.size());
+		auto main = screens.find(0);
+		if (main == screens.end() || screens.size() < 2 || screens.size() < g_peakScreens) {
+			return;
+		}
+		RECT m = main->second;
+		double w1 = m.right - m.left, h1 = m.bottom - m.top;
+		struct Seen {
+			int slot;
+			char side;
+			double distance;
+			double offset;
+		};
+		std::vector<Seen> seen;
+		for (auto& [slot, rc] : screens) {
+			if (slot == 0) {
+				continue;
+			}
+			double dx = (rc.left + rc.right) / 2.0 - (m.left + m.right) / 2.0;
+			double dy = (rc.top + rc.bottom) / 2.0 - (m.top + m.bottom) / 2.0;
+			double w = rc.right - rc.left, h = rc.bottom - rc.top;
+			if (std::abs(dx) / ((w1 + w) / 2) >= std::abs(dy) / ((h1 + h) / 2)) {
+				seen.push_back({slot, dx > 0 ? 'R' : 'L', std::abs(dx), (rc.top - m.top) / h1});
+			} else {
+				seen.push_back({slot, dy > 0 ? 'B' : 'T', std::abs(dy), (rc.left - m.left) / w1});
+			}
+		}
+		std::sort(seen.begin(), seen.end(), [](auto& a, auto& b) { return a.distance < b.distance; });
+		std::map<char, int> ranks;
+		for (auto& s : seen) {
+			g_arrangement[s.slot] = {s.side, ranks[s.side]++, std::clamp(s.offset, -0.9, 0.9)};
+		}
+		saveArrangement();
+	}
+
 	enum : uint32_t { BROKER_ADD = 1, BROKER_REMOVE = 2 };
 
 	struct BrokerRequest {
@@ -171,6 +268,25 @@ namespace {
 			Sleep(100);
 		}
 	}
+}
+
+void setArrangementFile(const std::wstring& path) {
+	std::lock_guard lock(g_configMutex);
+	g_arrangementFile = path;
+	g_arrangement.clear();
+	FILE* file = _wfopen(path.c_str(), L"r");
+	if (file == nullptr) {
+		return;
+	}
+	int slot = 0, rank = 0;
+	char side = 0;
+	double offset = 0;
+	while (fscanf(file, "%d %c %d %lf", &slot, &side, &rank, &offset) == 4) {
+		if (slot >= 1 && slot <= 8 && strchr("RLBT", side) != nullptr) {
+			g_arrangement[slot] = {side, rank, std::clamp(offset, -0.9, 0.9)};
+		}
+	}
+	fclose(file);
 }
 
 void useDisplayBroker(const std::wstring& pipeName, int screenIndex) {
@@ -570,34 +686,87 @@ bool layoutRow() {
 		return false;
 	}
 
-	// Screens left to right from 0,0
+	// Screen 1 at 0,0 (the main display); the others where the user arranged them last time (their
+	// side of screen 1, in order), else in a row right of it by screen number. If the remembered
+	// arrangement doesn't apply, the row.
 	std::sort(virtuals.begin(), virtuals.end(), [](auto& a, auto& b) { return a.slot < b.slot; });
-	LONG x = 0;
+	const auto originalModes = modes;
 	std::wstring summary;
-	for (auto& v : virtuals) {
-		auto& mode = modes[v.mode].sourceMode;
-		mode.position = {x, 0};
-		x += (LONG) mode.width;
-		summary += v.name + L" ";
-	}
-
-	// Monitors that are on: same layout, right edge at screen 1's left edge
-	if (!physicalModes.empty()) {
-		LONG maxRight = LONG_MIN, minTop = LONG_MAX;
-		for (auto idx : physicalModes) {
-			auto& mode = modes[idx].sourceMode;
-			maxRight = (std::max)(maxRight, mode.position.x + (LONG) mode.width);
-			minTop = (std::min)(minTop, mode.position.y);
+	auto arrange = [&](bool remembered) {
+		modes = originalModes;
+		summary.clear();
+		LONG minX = 0;
+		if (remembered && virtuals.front().slot == 0) {
+			auto& first = modes[virtuals.front().mode].sourceMode;
+			first.position = {0, 0};
+			LONG w1 = (LONG) first.width, h1 = (LONG) first.height;
+			summary += virtuals.front().name + L" ";
+			std::vector<std::pair<Placement, const VirtualDisplay*>> others;
+			for (size_t i = 1; i < virtuals.size(); i++) {
+				auto known = g_arrangement.find(virtuals[i].slot);
+				others.push_back({known != g_arrangement.end() ? known->second : Placement {'R', 1000 + virtuals[i].slot, 0}, &virtuals[i]});
+			}
+			std::sort(others.begin(), others.end(), [](auto& a, auto& b) {
+				return a.first.side != b.first.side ? a.first.side < b.first.side : a.first.rank < b.first.rank;
+			});
+			LONG right = w1, left = 0, below = h1, above = 0;
+			for (auto& [placement, v] : others) {
+				auto& mode = modes[v->mode].sourceMode;
+				LONG w = (LONG) mode.width, h = (LONG) mode.height;
+				switch (placement.side) {
+					case 'L':
+						left -= w;
+						mode.position = {left, (LONG) std::lround(placement.offset * h1)};
+						break;
+					case 'B':
+						mode.position = {(LONG) std::lround(placement.offset * w1), below};
+						below += h;
+						break;
+					case 'T':
+						above -= h;
+						mode.position = {(LONG) std::lround(placement.offset * w1), above};
+						break;
+					default:
+						mode.position = {right, (LONG) std::lround(placement.offset * h1)};
+						right += w;
+						break;
+				}
+				minX = (std::min)(minX, mode.position.x);
+				summary += v->name + L" ";
+			}
+		} else {
+			LONG x = 0;
+			for (auto& v : virtuals) {
+				auto& mode = modes[v.mode].sourceMode;
+				mode.position = {x, 0};
+				x += (LONG) mode.width;
+				summary += v.name + L" ";
+			}
 		}
-		for (auto idx : physicalModes) {
-			modes[idx].sourceMode.position.x -= maxRight;
-			modes[idx].sourceMode.position.y -= minTop;
-		}
-	}
 
-	LONG result = SetDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
-		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
-	wprintf(L"[SUDOVDA] Row %ls: %ld\n", summary.c_str(), result);
+		// Monitors that are on: same layout, right edge at the virtual screens' left edge
+		if (!physicalModes.empty()) {
+			LONG maxRight = LONG_MIN, minTop = LONG_MAX;
+			for (auto idx : physicalModes) {
+				auto& mode = modes[idx].sourceMode;
+				maxRight = (std::max)(maxRight, mode.position.x + (LONG) mode.width);
+				minTop = (std::min)(minTop, mode.position.y);
+			}
+			for (auto idx : physicalModes) {
+				modes[idx].sourceMode.position.x += minX - maxRight;
+				modes[idx].sourceMode.position.y -= minTop;
+			}
+		}
+		return SetDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
+			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
+	};
+	bool remembered = !g_arrangement.empty();
+	LONG result = arrange(remembered);
+	if (result != ERROR_SUCCESS && remembered) {
+		wprintf(L"[SUDOVDA] The remembered arrangement doesn't fit (%ld): a row\n", result);
+		result = arrange(false);
+	}
+	wprintf(L"[SUDOVDA] Screens %ls%ls: %ld\n", summary.c_str(), remembered ? L"(as arranged before)" : L"in a row", result);
 	if (result == ERROR_SUCCESS && !saved.empty()) {
 		if (!g_physicalDisabled) {
 			g_savedPaths = std::move(saved);
@@ -749,6 +918,11 @@ static void serveBrokerClient(HANDLE pipe) {
 			std::lock_guard lock(g_configMutex);
 			auto name = createVirtualDisplay(request.clientUid, request.clientName,
 				request.width, request.height, request.fps, request.guid);
+			ULONG owner = 0;
+			if (!name.empty() && GetNamedPipeClientProcessId(pipe, &owner)) {
+				std::lock_guard createdLock(g_createdMutex);
+				g_owners[guidKey(request.guid)] = owner;
+			}
 			if (!name.empty() && name.size() < CCHDEVICENAME) {
 				// One screen at a time: Windows switches it on, then it takes its place
 				changeDisplaySettings(name.c_str(), request.width, request.height, request.fps);
@@ -1484,12 +1658,32 @@ std::wstring createVirtualDisplay(
 		return std::wstring();
 	}
 
+	// Already there (a screen reconnecting while its display stayed): the same one if it has the
+	// resolution asked for. A display is created with its resolution's modes, so for another
+	// resolution it's replaced (switching its mode could fail and leave the old size).
+	std::wstring replaced;
 	{
 		std::lock_guard lock(g_createdMutex);
 		auto existing = g_created.find(guidKey(guid));
 		if (existing != g_created.end()) {
-			wprintf(L"[SUDOVDA] Virtual display already there: %ls\n", existing->second.c_str());
-			return existing->second;
+			DEVMODEW mode {};
+			mode.dmSize = sizeof(mode);
+			bool known = EnumDisplaySettingsW(existing->second.c_str(), ENUM_CURRENT_SETTINGS, &mode) != FALSE;
+			if (!known || (mode.dmPelsWidth == width && mode.dmPelsHeight == height)) {
+				wprintf(L"[SUDOVDA] Virtual display already there: %ls\n", existing->second.c_str());
+				return existing->second;
+			}
+			wprintf(L"[SUDOVDA] %ls is %lux%lu, %ux%u asked: replacing it\n", existing->second.c_str(),
+				mode.dmPelsWidth, mode.dmPelsHeight, width, height);
+			replaced = existing->second;
+			g_created.erase(existing);
+		}
+	}
+	if (!replaced.empty()) {
+		RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid);
+		// Until Windows has let go of it (up to 3 s), so the new one comes as a new display
+		for (int waited = 0; waited < 3000 && waitForDisplayActive(replaced.c_str(), 0); waited += 100) {
+			Sleep(100);
 		}
 	}
 
@@ -1555,7 +1749,14 @@ bool removeVirtualDisplay(const GUID& guid) {
 		return false;
 	}
 
+	{
+		// How the user has the screens arranged, before one of them goes
+		std::lock_guard configLock(g_configMutex);
+		captureArrangement();
+	}
+
 	std::wstring removedName;
+	bool noneLeft = false;
 	{
 		std::lock_guard lock(g_createdMutex);
 		auto created = g_created.find(guidKey(guid));
@@ -1563,18 +1764,56 @@ bool removeVirtualDisplay(const GUID& guid) {
 			removedName = created->second;
 			g_created.erase(created);
 		}
+		g_owners.erase(guidKey(guid));
+		noneLeft = g_created.empty();
 	}
 	if (!removedName.empty()) {
 		std::lock_guard configLock(g_configMutex);  // after, not inside, the other lock
 		g_slots.erase(removedName);
 	}
 
-	if (RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid)) {
+	bool removed = RemoveVirtualDisplay(SUDOVDA_DRIVER_HANDLE, guid);
+	if (removed) {
 		printf("[SUDOVDA] Virtual display removed successfully.\n");
-		return true;
-	} else {
-		return false;
 	}
+	if (!removedName.empty() && noneLeft) {
+		// The last screen ended (in whatever order they did): the monitors come back
+		{
+			std::lock_guard configLock(g_configMutex);
+			g_peakScreens = 0;
+		}
+		setKeepPhysicalOff(false);
+		restorePhysicalDisplays();
+	}
+	return removed;
+}
+
+void removeOrphanedVirtualDisplays() {
+	std::vector<std::string> orphaned;
+	{
+		std::lock_guard lock(g_createdMutex);
+		for (auto& [key, owner] : g_owners) {
+			HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, owner);
+			bool alive = process != nullptr && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+			if (process != nullptr) {
+				CloseHandle(process);
+			}
+			if (!alive) {
+				orphaned.push_back(key);
+			}
+		}
+	}
+	for (auto& key : orphaned) {
+		GUID guid;
+		memcpy(&guid, key.data(), sizeof(GUID));
+		printf("[SUDOVDA] Removing a display whose screen's process is gone\n");
+		removeVirtualDisplay(guid);
+	}
+}
+
+size_t virtualDisplayCount() {
+	std::lock_guard lock(g_createdMutex);
+	return g_created.size();
 }
 
 // START ISOLATED DISPLAY METHODS

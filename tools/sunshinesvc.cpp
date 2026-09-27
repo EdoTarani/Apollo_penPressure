@@ -17,6 +17,8 @@ SERVICE_STATUS_HANDLE service_status_handle;
 SERVICE_STATUS service_status;
 HANDLE stop_event;
 HANDLE session_change_event;
+HANDLE remote_disconnect_event;
+volatile DWORD remote_disconnect_session = 0xFFFFFFFF;
 
 // Optional config file for an additional instance (--config <file>); empty for the default instance
 std::wstring instance_config;
@@ -33,6 +35,11 @@ DWORD WINAPI HandlerEx(DWORD dwControl, DWORD dwEventType, LPVOID lpEventData, L
       // to allow it to spawn inside the new console session.
       if (dwEventType == WTS_CONSOLE_CONNECT) {
         SetEvent(session_change_event);
+      }
+      // An RDP session was left (disconnected, not signed out): see ReturnToConsoleThread
+      if (dwEventType == WTS_REMOTE_DISCONNECT && lpEventData != nullptr) {
+        remote_disconnect_session = ((WTSSESSION_NOTIFICATION *) lpEventData)->dwSessionId;
+        SetEvent(remote_disconnect_event);
       }
       return NO_ERROR;
 
@@ -188,6 +195,99 @@ DWORD WINAPI SendSasThread(LPVOID param) {
   return 0;
 }
 
+// ---- RDP: the session back on this PC's screen, locked ----
+// After an RDP session is left (disconnected), the user's session stays disconnected and this
+// PC's screen shows the sign-in screen, so Apollo streams that (or black) until someone runs
+// "tscon <session> /dest:console". We do that when an RDP session is left and nobody is
+// signed in on the screen, then lock the session: this PC shows its lock screen, as if the
+// user had locked it here, and the password (typed over Moonlight too) gets back in.
+
+bool SessionHasUser(DWORD session) {
+  LPWSTR user = nullptr;
+  DWORD bytes = 0;
+  bool has_user = false;
+  if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSUserName, &user, &bytes)) {
+    has_user = user != nullptr && user[0] != L'\0';
+    WTSFreeMemory(user);
+  }
+  return has_user;
+}
+
+bool SessionIsDisconnected(DWORD session) {
+  WTS_CONNECTSTATE_CLASS *state = nullptr;
+  DWORD bytes = 0;
+  bool disconnected = false;
+  if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, WTSConnectState, (LPWSTR *) &state, &bytes)) {
+    disconnected = state != nullptr && *state == WTSDisconnected;
+    WTSFreeMemory(state);
+  }
+  return disconnected;
+}
+
+void LockSession(DWORD session) {
+  HANDLE user_token;
+  if (!WTSQueryUserToken(session, &user_token)) {
+    return;
+  }
+  WCHAR rundll32[MAX_PATH];
+  GetSystemDirectoryW(rundll32, _countof(rundll32));
+  wcscat_s(rundll32, L"\\rundll32.exe");
+  std::wstring command = L"rundll32.exe user32.dll,LockWorkStation";
+
+  STARTUPINFOW startup_info = {};
+  startup_info.cb = sizeof(startup_info);
+  startup_info.lpDesktop = (LPWSTR) L"winsta0\\default";
+  PROCESS_INFORMATION process_info;
+  if (CreateProcessAsUserW(user_token, rundll32, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup_info, &process_info)) {
+    WaitForSingleObject(process_info.hProcess, 10000);
+    CloseHandle(process_info.hProcess);
+    CloseHandle(process_info.hThread);
+  }
+  CloseHandle(user_token);
+}
+
+void ReturnToConsole(DWORD session) {
+  DWORD console = WTSGetActiveConsoleSessionId();
+  // Never take the screen from someone signed in on it; only a session still left disconnected
+  if (console == 0xFFFFFFFF || console == session || SessionHasUser(console) ||
+      !SessionIsDisconnected(session) || !SessionHasUser(session)) {
+    return;
+  }
+  if (WTSConnectSessionW(session, console, (PWSTR) L"", TRUE)) {
+    LockSession(session);
+  }
+}
+
+DWORD WINAPI ReturnToConsoleThread(LPVOID) {
+  // At start too: a session left while the service wasn't running (the only disconnected one)
+  PWTS_SESSION_INFOW sessions = nullptr;
+  DWORD count = 0;
+  if (WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &count)) {
+    DWORD left = 0xFFFFFFFF;
+    int found = 0;
+    for (DWORD i = 0; i < count; i++) {
+      if (sessions[i].State == WTSDisconnected && SessionHasUser(sessions[i].SessionId)) {
+        left = sessions[i].SessionId;
+        found++;
+      }
+    }
+    WTSFreeMemory(sessions);
+    if (found == 1) {
+      ReturnToConsole(left);
+    }
+  }
+
+  const HANDLE wait_objects[] = {stop_event, remote_disconnect_event};
+  while (WaitForMultipleObjects(_countof(wait_objects), wait_objects, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
+    // Let Windows finish leaving the RDP session first
+    if (WaitForSingleObject(stop_event, 2000) == WAIT_OBJECT_0) {
+      break;
+    }
+    ReturnToConsole(remote_disconnect_session);
+  }
+  return 0;
+}
+
 VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
   service_status_handle = RegisterServiceCtrlHandlerEx(SERVICE_NAME, HandlerEx, nullptr);
   if (service_status_handle == nullptr) {
@@ -259,6 +359,12 @@ VOID WINAPI ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv) {
 
   if (HANDLE sas_event = CreateEventW(nullptr, FALSE, FALSE, L"Global\\ApolloSendSAS")) {
     CreateThread(nullptr, 0, SendSasThread, sas_event, 0, nullptr);
+  }
+
+  // The main instance's service only (an extra screen's service would do it twice)
+  remote_disconnect_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (instance_config.empty() && remote_disconnect_event != nullptr) {
+    CreateThread(nullptr, 0, ReturnToConsoleThread, nullptr, 0, nullptr);
   }
 
   // Tell SCM we're running (and stoppable now)
