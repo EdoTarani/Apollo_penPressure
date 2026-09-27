@@ -1174,7 +1174,8 @@ namespace platf {
   void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen) {
     auto raw = (client_input_raw_t *) input;
 
-    if (config::input.pen_virtual_tablet && pen_goes_to_virtual_tablet()) {
+    // The virtual Wacom when this PC has what it needs (Wacom driver, usbip-win2), else Windows Ink
+    if (config::input.pen_virtual_tablet && virtual_tablet::available() && pen_goes_to_virtual_tablet()) {
       forward_pen_to_virtual_tablet(touch_port, pen);
       return;
     }

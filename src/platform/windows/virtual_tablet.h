@@ -18,6 +18,13 @@ namespace platf::virtual_tablet {
   void start();
 
   /**
+   * @brief True when the tablet can be used on this PC: the Wacom driver (free from wacom.com)
+   * and usbip-win2 (installed with Apollo) are there. Otherwise pen input goes through Windows
+   * Ink. Checked again every 10 s, so a driver installed later works from the next stream.
+   */
+  bool available();
+
+  /**
    * @brief Stop serving the tablet (the Wacom driver sees it unplugged).
    */
   void stop();

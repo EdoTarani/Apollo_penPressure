@@ -183,7 +183,7 @@ const config = ref(props.config)
               id="pen_virtual_tablet"
               locale-prefix="config"
               v-model="config.pen_virtual_tablet"
-              default="false"
+              default="true"
     ></Checkbox>
 
     <!-- Which tablet the virtual Wacom is -->

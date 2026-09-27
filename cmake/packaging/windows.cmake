@@ -18,6 +18,23 @@ install(FILES ${VIGEMBUS_INSTALLER}
         RENAME "vigembus_installer.exe"
         COMPONENT gamepad)
 
+# usbip-win2 installer (BSD-2-Clause): connects the built-in virtual Wacom tablet as a USB device
+set(USBIP_INSTALLER "${CMAKE_BINARY_DIR}/usbip_installer.exe")
+file(DOWNLOAD
+        "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.0/USBip-0.9.8.0-x64.exe"
+        ${USBIP_INSTALLER}
+        SHOW_PROGRESS
+        EXPECTED_HASH SHA256=81f426741f7ee2ed991febe24a22daca8400b6ae2f171054e3fb404897e15d39
+        TIMEOUT 120
+)
+install(FILES ${USBIP_INSTALLER}
+        DESTINATION "drivers/usbip"
+        RENAME "usbip_installer.exe"
+        COMPONENT usbip)
+install(DIRECTORY "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/drivers/usbip/"
+        DESTINATION "drivers/usbip"
+        COMPONENT usbip)
+
 # Adding tools
 install(TARGETS dxgi-info RUNTIME DESTINATION "tools" COMPONENT dxgi)
 install(TARGETS audio-info RUNTIME DESTINATION "tools" COMPONENT audio)
@@ -100,6 +117,9 @@ set(CPACK_COMPONENT_SUDOVDA_DISPLAY_NAME "SudoVDA")
 set(CPACK_COMPONENT_SUDOVDA_DESCRIPTION "Driver required for Virtual Display to function.")
 set(CPACK_COMPONENT_SUDOVDA_GROUP "Drivers")
 set(CPACK_COMPONENT_SUDOVDA_REQUIRED true)
+set(CPACK_COMPONENT_USBIP_DISPLAY_NAME "usbip-win2")
+set(CPACK_COMPONENT_USBIP_DESCRIPTION "Connects the virtual Wacom tablet (pen with full pressure and tilt; also needs the Wacom driver).")
+set(CPACK_COMPONENT_USBIP_GROUP "Drivers")
 
 # audio tool
 set(CPACK_COMPONENT_AUDIO_DISPLAY_NAME "audio-info")

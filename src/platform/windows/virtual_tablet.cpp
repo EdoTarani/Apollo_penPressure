@@ -1099,6 +1099,9 @@ namespace platf::virtual_tablet {
       if (g_stopping) {
         return;
       }
+      if (want && !available()) {
+        return;  // no Wacom driver (or usbip-win2): pen input goes through Windows Ink
+      }
 
       std::string out;
       DWORD code = 0;
@@ -1132,6 +1135,40 @@ namespace platf::virtual_tablet {
       }
     }
   }  // namespace
+
+  bool available() {
+    static std::mutex mutex;
+    static std::chrono::steady_clock::time_point checked {};
+    static bool wacom = false, usbip = false, logged = false;
+    std::lock_guard lg(mutex);
+    auto now = std::chrono::steady_clock::now();
+    if (logged && now - checked < 10s) {
+      return wacom && usbip;
+    }
+    checked = now;
+
+    bool had_wacom = wacom, had_usbip = usbip;
+    wacom = false;
+    if (SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
+      for (const wchar_t *name : {L"WTabletServicePro", L"WTabletServiceCon"}) {
+        if (SC_HANDLE service = OpenServiceW(scm, name, SERVICE_QUERY_STATUS)) {
+          CloseServiceHandle(service);
+          wacom = true;
+          break;
+        }
+      }
+      CloseServiceHandle(scm);
+    }
+    usbip = GetFileAttributesW(usbip_exe().c_str()) != INVALID_FILE_ATTRIBUTES;
+
+    if (!logged || wacom != had_wacom || usbip != had_usbip) {
+      logged = true;
+      BOOST_LOG(info) << "Virtual tablet: Wacom driver "sv << (wacom ? "installed"sv : "not installed (free from wacom.com)"sv)
+                      << ", usbip-win2 "sv << (usbip ? "installed"sv : "not installed"sv) << ": pen input via "sv
+                      << (wacom && usbip ? "the virtual Wacom"sv : "Windows Ink"sv);
+    }
+    return wacom && usbip;
+  }
 
   void set_plugged(bool plugged) {
     if (!g_running) {

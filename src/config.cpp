@@ -580,7 +580,7 @@ namespace config {
     true,  // always send scancodes
     true,  // high resolution scrolling
     true,  // native pen/touch support
-    false,  // pen_virtual_tablet
+    true,  // pen_virtual_tablet (used when the Wacom driver is installed, else Windows Ink)
     47000,  // pen_virtual_tablet_port
     true,  // pen_virtual_tablet_desktop
     true,  // pen_virtual_tablet_host

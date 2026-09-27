@@ -273,7 +273,7 @@
     "disable_physical_displays": "Switch off physical monitors while streaming",
     "disable_physical_displays_desc": "While a stream uses virtual displays (Headless Mode, Virtual Desktop or extra screens), only the virtual displays stay on. Other tools' virtual screens (e.g. Parsec's) are left as they are. The monitors come back when the stream ends (and when Apollo starts, if they were left off).",
     "pen_virtual_tablet": "Virtual Wacom Tablet (vwacom)",
-    "pen_virtual_tablet_desc": "When enabled, Apollo plugs a virtual Wacom tablet into this PC while a stream runs (needs usbip-win2) and sends pen input from Moonlight to it instead of Windows Ink. The Wacom driver then provides full pressure, tilt, both pen buttons, hover and Wintab. Nothing else to install or start.",
+    "pen_virtual_tablet_desc": "While a stream runs, Apollo plugs a virtual Wacom tablet into this PC and sends Moonlight's pen input to it: the Wacom driver then provides full pressure, tilt, the pen buttons, hover and Wintab. It needs the Wacom driver on this PC (free from wacom.com); usbip-win2, which connects the tablet, is installed with Apollo. Without the Wacom driver, pen input goes through Windows Ink.",
     "pen_virtual_tablet_desktop": "Virtual Tablet Spans All Screens",
     "pen_virtual_tablet_desktop_desc": "Send pen positions relative to the whole desktop instead of this stream's display, so one virtual tablet serves every Apollo instance (one per screen). Map the virtual Cintiq to All Displays in Wacom Tablet Properties and enable this on every instance.",
     "pen_virtual_tablet_model": "Virtual Tablet Model",
