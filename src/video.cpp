@@ -3,6 +3,7 @@
  * @brief Definitions for video.
  */
 // standard includes
+#include <algorithm>
 #include <atomic>
 #include <bitset>
 #include <list>
@@ -1076,6 +1077,51 @@ namespace video {
   }
 
   /**
+   * The display a stream with its own virtual display captures, found by its device id: Windows
+   * can give its GDI name (\\.\DISPLAYn) to another display when it reconfigures. Empty when the
+   * stream has no virtual display of its own.
+   */
+  static std::string own_display_name() {
+    if (!proc::proc.virtual_display) {
+      return {};
+    }
+    auto by_id = display_device::map_output_name(config::video.output_name);
+    return by_id.empty() ? proc::proc.display_name : by_id;
+  }
+
+  /**
+   * A stream with its own virtual display waits for it (up to 10 s) instead of capturing another
+   * one: while other screens' displays are added, Windows reconfigures, every capture restarts,
+   * and a display can be missing for a moment. Falling back to the first display then streamed
+   * another screen's picture (a screen duplicating screen 1), and stuck to it.
+   * @return true with the list and index set when it's there.
+   */
+  static bool wait_for_own_display(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index) {
+    if (!proc::proc.virtual_display) {
+      return false;
+    }
+    for (int waited = 0; waited <= 10000; waited += 250) {
+      auto own = own_display_name();
+      auto names = platf::display_names(dev_type);
+      auto it = std::find(names.begin(), names.end(), own);
+      if (!own.empty() && it != names.end()) {
+        if (waited > 0) {
+          BOOST_LOG(info) << "This stream's display ["sv << own << "] is back after "sv << waited << " ms"sv;
+        }
+        current_display_index = (int) (it - names.begin());
+        display_names = std::move(names);
+        return true;
+      }
+      if (waited == 0) {
+        BOOST_LOG(info) << "Waiting for this stream's display ["sv << own << "] to come back"sv;
+      }
+      std::this_thread::sleep_for(250ms);
+    }
+    BOOST_LOG(warning) << "This stream's own display didn't come back; capturing another display"sv;
+    return false;
+  }
+
+  /**
    * @brief Update the list of display names before or during a stream.
    * @details This will attempt to keep `current_display_index` pointing at the same display.
    * @param dev_type The encoder device type used for display lookup.
@@ -1083,6 +1129,10 @@ namespace video {
    * @param current_display_index The current display index or -1 if not yet known.
    */
   void refresh_displays(platf::mem_type_e dev_type, std::vector<std::string> &display_names, int &current_display_index, std::string &preferred_display_name) {
+    if (wait_for_own_display(dev_type, display_names, current_display_index)) {
+      return;
+    }
+
     // It is possible that the output name may be empty even if it wasn't before (device disconnected) or vice-versa
     const auto output_name { display_device::map_output_name(config::video.output_name) };
     std::string current_display_name = preferred_display_name;
@@ -1170,8 +1220,10 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
-    if (!proc::proc.display_name.empty()) {
-      disp = platf::display(encoder.platform_formats->dev_type, proc::proc.display_name, capture_ctxs.front().config);
+    auto own_display = own_display_name();
+    if (!own_display.empty() || !proc::proc.display_name.empty()) {
+      disp = platf::display(encoder.platform_formats->dev_type, own_display.empty() ? proc::proc.display_name : own_display,
+                            capture_ctxs.front().config);
     }
     if (!disp) {
       // Get all the monitor names now, rather than at boot, to
@@ -1179,7 +1231,10 @@ namespace video {
       refresh_displays(encoder.platform_formats->dev_type, display_names, display_p);
       disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
       if (disp) {
-        proc::proc.display_name = display_names[display_p];
+        // A stream with its own display keeps it as the one to go back to
+        if (!proc::proc.virtual_display || display_names[display_p] == own_display_name()) {
+          proc::proc.display_name = display_names[display_p];
+        }
       } else {
         return;
       }
@@ -1379,7 +1434,10 @@ namespace video {
               // reset_display() will sleep between retries
               reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
               if (disp) {
-                proc::proc.display_name = display_names[display_p];
+                // A stream with its own display keeps it as the one to go back to
+                if (!proc::proc.virtual_display || display_names[display_p] == own_display_name()) {
+                  proc::proc.display_name = display_names[display_p];
+                }
                 break;
               }
             }

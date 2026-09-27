@@ -58,24 +58,66 @@ namespace {
 	std::vector<DISPLAYCONFIG_PATH_INFO> g_savedPaths;
 	std::vector<DISPLAYCONFIG_MODE_INFO> g_savedModes;
 
-	bool isSudoAdapter(const wchar_t* gdiName) {
+	// The display adapter behind a GDI display name ("NVIDIA ...", "SudoMaker Virtual Display
+	// Adapter", "Parsec Virtual Display Adapter"...), lowercase
+	std::wstring adapterName(const wchar_t* gdiName) {
 		DISPLAY_DEVICEW adapter {};
 		adapter.cb = sizeof(adapter);
 		for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &adapter, 0); i++, adapter.cb = sizeof(adapter)) {
 			if (_wcsicmp(adapter.DeviceName, gdiName) == 0) {
-				return wcsstr(adapter.DeviceString, L"Sudo") != nullptr;
+				std::wstring name = adapter.DeviceString;
+				CharLowerBuffW(name.data(), (DWORD) name.size());
+				return name;
+			}
+		}
+		return std::wstring();
+	}
+
+	bool isSudoAdapter(const wchar_t* gdiName) {
+		return adapterName(gdiName).find(L"sudo") != std::wstring::npos;
+	}
+
+	/**
+	 * Another tool's virtual display (Parsec's, a virtual display driver's): not a monitor, so
+	 * it's left as it is, never switched off. That tool may be streaming it: switching Parsec's
+	 * screens off during a Parsec session made it bring them back while ours were being set up,
+	 * and the layouts Windows re-applied switched ours off or swapped them.
+	 */
+	bool isOtherVirtualAdapter(const wchar_t* gdiName) {
+		auto name = adapterName(gdiName);
+		if (name.empty() || name.find(L"sudo") != std::wstring::npos) {
+			return false;
+		}
+		for (const wchar_t* hint : {L"parsec", L"virtual display", L"virtual monitor", L"iddsampledriver"}) {
+			if (name.find(hint) != std::wstring::npos) {
+				return true;
 			}
 		}
 		return false;
 	}
 
-	bool isSudoPath(const DISPLAYCONFIG_PATH_INFO& path) {
+	std::wstring sourceName(const DISPLAYCONFIG_PATH_INFO& path) {
 		DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
 		source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
 		source.header.size = sizeof(source);
 		source.header.adapterId = path.sourceInfo.adapterId;
 		source.header.id = path.sourceInfo.id;
-		return DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS && isSudoAdapter(source.viewGdiDeviceName);
+		return DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS ? std::wstring(source.viewGdiDeviceName) : std::wstring();
+	}
+
+	bool isSudoPath(const DISPLAYCONFIG_PATH_INFO& path) {
+		auto name = sourceName(path);
+		return !name.empty() && isSudoAdapter(name.c_str());
+	}
+
+	bool isOtherVirtualPath(const DISPLAYCONFIG_PATH_INFO& path) {
+		auto name = sourceName(path);
+		return !name.empty() && isOtherVirtualAdapter(name.c_str());
+	}
+
+	bool sameTarget(const DISPLAYCONFIG_PATH_INFO& a, const DISPLAYCONFIG_PATH_INFO& b) {
+		return a.targetInfo.adapterId.LowPart == b.targetInfo.adapterId.LowPart &&
+			a.targetInfo.adapterId.HighPart == b.targetInfo.adapterId.HighPart && a.targetInfo.id == b.targetInfo.id;
 	}
 
 	bool activePaths(std::vector<DISPLAYCONFIG_PATH_INFO>& paths, std::vector<DISPLAYCONFIG_MODE_INFO>& modes) {
@@ -236,7 +278,8 @@ std::wstring describeDisplays() {
 		EnumDisplaySettingsExW(adapter.DeviceName, ENUM_CURRENT_SETTINGS, &mode, 0);
 		wchar_t line[256];
 		swprintf_s(line, L"%ls%ls %ls%lux%lu at %ld,%ld", out.empty() ? L"" : L"; ", adapter.DeviceName,
-			wcsstr(adapter.DeviceString, L"Sudo") ? L"virtual " : L"", mode.dmPelsWidth, mode.dmPelsHeight,
+			wcsstr(adapter.DeviceString, L"Sudo") ? L"virtual " : isOtherVirtualAdapter(adapter.DeviceName) ? L"other tool's virtual " : L"",
+			mode.dmPelsWidth, mode.dmPelsHeight,
 			mode.dmPosition.x, mode.dmPosition.y);
 		out += line;
 	}
@@ -350,10 +393,12 @@ bool keepOnlyVirtualDisplays() {
 		return false;
 	}
 
-	// Supply only the virtual displays' paths (and their modes): the others go off.
-	// Remember the others (the monitors' positions haven't changed) to put them back later.
+	// Supply only the virtual displays' paths (ours, and other tools' left as they are) and
+	// their modes: the monitors go off. Remember them (their positions haven't changed) to put
+	// them back later.
 	std::vector<DISPLAYCONFIG_PATH_INFO> keep, saved;
 	std::vector<DISPLAYCONFIG_MODE_INFO> keepModes, savedModes;
+	std::vector<UINT32> ourSourceModes;  // in keepModes
 	auto copyMode = [&](std::vector<DISPLAYCONFIG_MODE_INFO>& to, UINT32& idx) {
 		if (idx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && idx < modes.size()) {
 			to.push_back(modes[idx]);
@@ -361,23 +406,31 @@ bool keepOnlyVirtualDisplays() {
 		}
 	};
 	for (auto path : paths) {
-		bool isVirtual = isSudoPath(path);
-		auto& to = isVirtual ? keepModes : savedModes;
+		bool ours = isSudoPath(path);
+		bool stayOn = ours || isOtherVirtualPath(path);
+		auto& to = stayOn ? keepModes : savedModes;
 		copyMode(to, path.sourceInfo.modeInfoIdx);
 		copyMode(to, path.targetInfo.modeInfoIdx);
-		(isVirtual ? keep : saved).push_back(path);
+		if (ours && path.sourceInfo.modeInfoIdx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID) {
+			ourSourceModes.push_back(path.sourceInfo.modeInfoIdx);
+		}
+		(stayOn ? keep : saved).push_back(path);
 	}
-	if (keep.empty() || keep.size() == paths.size()) {
-		return false;  // never switch every display off; or nothing to switch off
+	if (ourSourceModes.empty() || saved.empty()) {
+		return false;  // never without one of ours on; or no monitor to switch off
 	}
 
-	// The primary display must sit at 0,0: move the leftmost virtual display there
+	// The primary display must sit at 0,0: move our leftmost virtual display there
 	LONG minX = LONG_MAX, minY = 0;
-	for (auto& mode : keepModes) {
+	for (auto idx : ourSourceModes) {
+		auto& mode = keepModes[idx];
 		if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE && mode.sourceMode.position.x < minX) {
 			minX = mode.sourceMode.position.x;
 			minY = mode.sourceMode.position.y;
 		}
+	}
+	if (minX == LONG_MAX) {
+		return false;
 	}
 	for (auto& mode : keepModes) {
 		if (mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
@@ -581,18 +634,92 @@ void restorePhysicalDisplays() {
 	}
 
 	// Exactly the layout from before, not saved as Windows' remembered layout (it has the user's
-	// own); if that no longer fits (e.g. a monitor was unplugged), the usual extended layout
+	// own). What's gone from it meanwhile (a monitor unplugged, another tool's virtual screen
+	// removed) is left out, and displays on now that weren't in it (e.g. another tool's virtual
+	// screen that came meanwhile) stay on, right of it: this never switches a display off. If
+	// it still doesn't apply, the usual extended layout.
+	std::vector<DISPLAYCONFIG_PATH_INFO> all;
+	std::vector<DISPLAYCONFIG_MODE_INFO> allModes;
+	UINT32 pathCount = 0, modeCount = 0;
+	if (GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &pathCount, &modeCount) == ERROR_SUCCESS) {
+		all.resize(pathCount);
+		allModes.resize(modeCount);
+		if (QueryDisplayConfig(QDC_ALL_PATHS, &pathCount, all.data(), &modeCount, allModes.data(), nullptr) == ERROR_SUCCESS) {
+			all.resize(pathCount);
+		} else {
+			all.clear();
+		}
+	}
+	auto stillThere = [&](const DISPLAYCONFIG_PATH_INFO& saved) {
+		for (auto& path : all) {
+			if (sameTarget(path, saved)) {
+				return path.targetInfo.targetAvailable != FALSE;
+			}
+		}
+		return false;
+	};
+
+	std::vector<DISPLAYCONFIG_PATH_INFO> active;
+	std::vector<DISPLAYCONFIG_MODE_INFO> activeModes;
+	bool haveActive = activePaths(active, activeModes);
+	std::vector<DISPLAYCONFIG_PATH_INFO> config;
+	std::vector<DISPLAYCONFIG_MODE_INFO> configModes;
+	configModes.reserve(g_savedModes.size() + activeModes.size());  // take()'s pointers stay valid
+	auto take = [&](DISPLAYCONFIG_PATH_INFO path, const std::vector<DISPLAYCONFIG_MODE_INFO>& from) -> DISPLAYCONFIG_SOURCE_MODE* {
+		for (auto* i : {&path.sourceInfo.modeInfoIdx, &path.targetInfo.modeInfoIdx}) {
+			if (*i != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && *i < from.size()) {
+				configModes.push_back(from[*i]);
+				*i = (UINT32) configModes.size() - 1;
+			} else {
+				*i = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+			}
+		}
+		config.push_back(path);
+		auto idx = path.sourceInfo.modeInfoIdx;
+		return idx != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && configModes[idx].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE ?
+			&configModes[idx].sourceMode : nullptr;
+	};
+
+	LONG right = LONG_MIN;
+	size_t restored = 0;
+	for (auto& saved : g_savedPaths) {
+		if (!stillThere(saved)) {
+			continue;
+		}
+		if (auto* mode = take(saved, g_savedModes)) {
+			right = (std::max)(right, mode->position.x + (LONG) mode->width);
+		}
+		restored++;
+	}
+	if (haveActive) {
+		for (auto& path : active) {
+			bool known = isSudoPath(path);  // ours, still going: left out
+			for (auto& saved : g_savedPaths) {
+				known = known || sameTarget(saved, path);
+			}
+			if (known) {
+				continue;
+			}
+			auto* mode = take(path, activeModes);
+			if (mode != nullptr && right != LONG_MIN) {
+				mode->position = {right, 0};
+				right += (LONG) mode->width;
+			}
+		}
+	}
+
 	LONG result = ERROR_INVALID_PARAMETER;
-	if (!g_savedPaths.empty()) {
-		result = SetDisplayConfig((UINT32) g_savedPaths.size(), g_savedPaths.data(), (UINT32) g_savedModes.size(), g_savedModes.data(),
+	if (restored > 0) {
+		result = SetDisplayConfig((UINT32) config.size(), config.data(), (UINT32) configModes.size(), configModes.data(),
 			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
 	}
 	if (result != ERROR_SUCCESS) {
 		result = SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
 	}
+	printf("[SUDOVDA] Physical displays back on (%zu of %zu from before, %zu others kept): %ld\n", restored, g_savedPaths.size(),
+		config.size() - restored, result);
 	g_savedPaths.clear();
 	g_savedModes.clear();
-	printf("[SUDOVDA] Physical displays back on: %ld\n", result);
 }
 
 void ensurePhysicalDisplaysOn() {
@@ -602,7 +729,7 @@ void ensurePhysicalDisplaysOn() {
 		return;
 	}
 	for (auto& path : paths) {
-		if (!isSudoPath(path)) {
+		if (!isSudoPath(path) && !isOtherVirtualPath(path)) {
 			return;  // a physical display is on
 		}
 	}

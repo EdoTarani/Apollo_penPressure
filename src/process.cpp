@@ -386,7 +386,18 @@ namespace proc {
           // So we always set output_name to the newly created virtual display as a workaround for
           // empty name when probing graphics cards.
 
-          config::video.output_name = display_device::map_display_name(this->display_name);
+          // By its device id, the capture finds it again when Windows gives its GDI name to another
+          // display (while the other screens' displays are added). Just switched on, it can take a
+          // moment to be listed.
+          auto device_id = display_device::map_display_name(this->display_name);
+          for (int tries = 0; device_id.empty() && tries < 20; ++tries) {
+            std::this_thread::sleep_for(150ms);
+            device_id = display_device::map_display_name(this->display_name);
+          }
+          if (device_id.empty()) {
+            BOOST_LOG(warning) << "Virtual display "sv << this->display_name << " isn't listed yet; capturing it by name"sv;
+          }
+          config::video.output_name = device_id;
         } else {
           BOOST_LOG(warning) << "Virtual Display creation failed, or cannot get created display name in time!";
         }
