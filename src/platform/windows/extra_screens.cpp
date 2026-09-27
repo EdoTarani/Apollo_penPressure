@@ -144,10 +144,10 @@ namespace platf::extra_screens {
       // The virtual Cintiq is a pen display: Wacom ties it to one monitor, the chosen screen's.
       // That screen forwards its pen to our tablet (positions relative to its own display); the
       // others use a Windows Ink pen.
-      int tablet_screen = config::input.pen_virtual_tablet_screen <= config::nvhttp.extra_screens + 1 ? config::input.pen_virtual_tablet_screen : 1;
+      int tablet_screen = config::input.pen_virtual_tablet_screen <= config::nvhttp.extra_screens + 1 ? config::input.pen_virtual_tablet_screen : 1;  // 0 = all
       out << "pen_virtual_tablet = " << (config::input.pen_virtual_tablet ? "enabled" : "disabled") << '\n';
       out << "pen_virtual_tablet_host = disabled\n";
-      out << "pen_virtual_tablet_desktop = disabled\n";
+      out << "pen_virtual_tablet_desktop = enabled\n";  // positions on the whole desktop (Wacom: All displays)
       out << "pen_virtual_tablet_screen = " << tablet_screen << '\n';
 
       auto path = dir / ("sunshine_" + suffix + ".conf");
@@ -314,9 +314,10 @@ namespace platf::extra_screens {
     VDISPLAY::startDisplayBroker(platf::from_utf8(broker_pipe_utf8()),
                                  config::nvhttp.extra_screens_arrange && !config::video.isolated_virtual_display_option);
 
-    // The virtual Cintiq covers screen 1 only (Wacom maps a pen display to one monitor):
-    // positions relative to screen 1, not the whole desktop
-    config::input.pen_virtual_tablet_desktop = false;
+    // Pen positions on the whole desktop, with the virtual Cintiq set to "All displays" in the
+    // Wacom settings: that mapping doesn't depend on which (virtual) monitor is which, which
+    // changes between connections
+    config::input.pen_virtual_tablet_desktop = true;
 
     g_job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits {};

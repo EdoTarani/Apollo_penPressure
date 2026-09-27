@@ -278,7 +278,7 @@
     "pen_virtual_tablet_desktop": "Virtual Tablet Spans All Screens",
     "pen_virtual_tablet_desktop_desc": "Send pen positions relative to the whole desktop instead of this stream's display, so one virtual tablet serves every Apollo instance (one per screen). Map the virtual Cintiq to All Displays in Wacom Tablet Properties and enable this on every instance.",
     "pen_virtual_tablet_screen": "Wacom Tablet on Screen",
-    "pen_virtual_tablet_screen_desc": "With extra screens, pen input on this screen goes to the virtual Wacom (full pressure, tilt, buttons, Wintab); the other screens get a Windows Ink pen. A Cintiq belongs to one monitor: in Wacom Tablet Properties > Calibrate, set Monitor to this screen's display once (Windows remembers the screens' displays).",
+    "pen_virtual_tablet_screen_desc": "With extra screens: which screens' pen input goes to the virtual Wacom (full pressure, tilt, buttons, Wintab); any others get a Windows Ink pen. Set the virtual Cintiq once to All displays (Wacom Center > Display toggle: tick only 'Full display setup - All displays'), whichever screens you choose here.",
     "notify_pre_releases": "PreRelease Notifications",
     "notify_pre_releases_desc": "Whether to be notified of new pre-release versions of Apollo",
     "nvenc_h264_cavlc": "Prefer CAVLC over CABAC in H.264",

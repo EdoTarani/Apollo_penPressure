@@ -839,18 +839,20 @@ namespace platf {
    * @param x The normalized 0.0-1.0 X coordinate.
    * @param y The normalized 0.0-1.0 Y coordinate.
    */
+  // touchPort's offset is relative to the desktop's top-left corner; injected pointers need
+  // screen coordinates, which are negative left of/above the main display
   void populate_common_pointer_info(POINTER_INFO &pointerInfo, const touch_port_t &touchPort, uint8_t eventType, float x, float y) {
     switch (eventType) {
       case LI_TOUCH_EVENT_HOVER:
         pointerInfo.pointerFlags &= ~POINTER_FLAG_INCONTACT;
         pointerInfo.pointerFlags |= POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE;
-        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x;
-        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y;
+        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x + GetSystemMetrics(SM_XVIRTUALSCREEN);
+        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y + GetSystemMetrics(SM_YVIRTUALSCREEN);
         break;
       case LI_TOUCH_EVENT_DOWN:
         pointerInfo.pointerFlags |= POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN;
-        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x;
-        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y;
+        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x + GetSystemMetrics(SM_XVIRTUALSCREEN);
+        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y + GetSystemMetrics(SM_YVIRTUALSCREEN);
         break;
       case LI_TOUCH_EVENT_UP:
         // We expect to get another LI_TOUCH_EVENT_HOVER if the pointer remains in range
@@ -859,8 +861,8 @@ namespace platf {
         break;
       case LI_TOUCH_EVENT_MOVE:
         pointerInfo.pointerFlags |= POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE;
-        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x;
-        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y;
+        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x + GetSystemMetrics(SM_XVIRTUALSCREEN);
+        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y + GetSystemMetrics(SM_YVIRTUALSCREEN);
         break;
       case LI_TOUCH_EVENT_CANCEL:
       case LI_TOUCH_EVENT_CANCEL_ALL:
@@ -1099,13 +1101,13 @@ namespace platf {
     float x = pen.x;
     float y = pen.y;
     if (config::input.pen_virtual_tablet_desktop && touch_port.width > 0 && touch_port.height > 0) {
-      int desktop_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-      int desktop_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+      // The display's offset is already relative to the desktop's top-left corner
+      // (display_base: offset -= SM_X/YVIRTUALSCREEN)
       int desktop_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
       int desktop_h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
       if (desktop_w > 0 && desktop_h > 0) {
-        x = (pen.x * touch_port.width + touch_port.offset_x - desktop_x) / (float) desktop_w;
-        y = (pen.y * touch_port.height + touch_port.offset_y - desktop_y) / (float) desktop_h;
+        x = (pen.x * touch_port.width + touch_port.offset_x) / (float) desktop_w;
+        y = (pen.y * touch_port.height + touch_port.offset_y) / (float) desktop_h;
       }
     }
 
@@ -1160,6 +1162,9 @@ namespace platf {
   static bool pen_goes_to_virtual_tablet() {
     int screen = config::nvhttp.extra_screen_index > 0 ? config::nvhttp.extra_screen_index : 1;
     int chosen = config::input.pen_virtual_tablet_screen;
+    if (chosen == 0) {
+      return true;  // all screens
+    }
     if (config::nvhttp.extra_screen_index == 0 && chosen > config::nvhttp.extra_screens + 1) {
       chosen = 1;  // no such screen right now
     }

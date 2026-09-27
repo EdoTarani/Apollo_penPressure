@@ -190,6 +190,7 @@ const config = ref(props.config)
     <div class="mb-3" v-if="platform === 'windows' && config.pen_virtual_tablet === 'enabled' && config.extra_screens > 0">
       <label for="pen_virtual_tablet_screen" class="form-label">{{ $t('config.pen_virtual_tablet_screen') }}</label>
       <select id="pen_virtual_tablet_screen" class="form-select" v-model="config.pen_virtual_tablet_screen">
+        <option value="0">All screens</option>
         <option value="1">Screen 1</option>
         <option value="2">Screen 2</option>
         <option value="3" v-if="config.extra_screens > 1">Screen 3</option>
