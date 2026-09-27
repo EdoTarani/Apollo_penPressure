@@ -437,7 +437,7 @@ namespace config {
   }  // namespace dd
 
   video_t video {
-    false, // headless_mode
+    true, // headless_mode (every app, Desktop included, on a virtual display)
     true, // limit_framerate
     false, // double_refreshrate
 

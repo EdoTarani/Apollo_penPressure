@@ -1556,9 +1556,10 @@ namespace proc {
       apps.emplace_back(std::move(ctx));
     }
 
-    // Virtual Display entry
+    // Virtual Display entry: only when Desktop streams the monitors (headless mode off, no extra
+    // screens); otherwise Desktop already has a virtual display and two tiles only confuse
   #ifdef _WIN32
-    if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
+    if (vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK && !config::video.headless_mode && config::nvhttp.extra_screens == 0) {
       proc::ctx_t ctx;
       ctx.idx = std::to_string(i);
       ctx.uuid = VIRTUAL_DISPLAY_UUID;

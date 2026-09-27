@@ -148,7 +148,7 @@ const validateFallbackMode = (event) => {
               id="headless_mode"
               locale-prefix="config"
               v-model="config.headless_mode"
-              default="false"
+              default="true"
               v-if="platform === 'windows'"
     ></Checkbox>
 
