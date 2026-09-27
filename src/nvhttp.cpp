@@ -1188,8 +1188,27 @@ namespace nvhttp {
 
   }
 
+  /**
+   * A client's disconnect ends its session on the RTSP thread, and ending the last one can take
+   * seconds: with virtual displays the app ends, the displays go and the monitors come back (and
+   * the app already reads as not running meanwhile). A launch or resume arriving then worked on a
+   * half-ended app: the old teardown switched the new display off and cleared the new session's
+   * state (a reconnect, e.g. for a new resolution, got duplicate screens and a lost monitor).
+   * Ending sessions are joined under the session list's lock, so settling that list waits for
+   * a teardown in progress, or does a pending one here.
+   */
+  static void settle_ending_sessions() {
+    auto start = std::chrono::steady_clock::now();
+    rtsp_stream::session_count();
+    auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    if (waited >= 100) {
+      BOOST_LOG(info) << "Waited "sv << waited << " ms for the previous session to end"sv;
+    }
+  }
+
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
+    settle_ending_sessions();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -1401,6 +1420,19 @@ namespace nvhttp {
   }
 
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
+    // A resume that can't really resume starts the app afresh instead: the app ended when its
+    // last client left (the client saw it still running a moment before), or this is an extra
+    // screen, whose one window's new connection always starts over with its own display
+    settle_ending_sessions();
+    if (proc::proc.running() == 0 || config::nvhttp.extra_screen_index > 0) {
+      auto args = request->parse_query_string();
+      if (args.find("appid"s) != std::end(args) || args.find("appuuid"s) != std::end(args)) {
+        BOOST_LOG(info) << "Resume request: starting the app afresh"sv;
+        launch(host_audio, response, request);
+        return;
+      }
+    }
+
     print_req<SunshineHTTPS>(request);
 
     pt::ptree tree;

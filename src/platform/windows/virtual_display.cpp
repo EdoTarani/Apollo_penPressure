@@ -308,6 +308,40 @@ void removeAllVirtualDisplays() {
 	}
 }
 
+void savePhysicalLayout() {
+	std::lock_guard lock(g_configMutex);
+	if (g_physicalDisabled) {
+		return;  // the layout from before is kept until it's put back
+	}
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+	if (!activePaths(paths, modes)) {
+		return;
+	}
+
+	std::vector<DISPLAYCONFIG_PATH_INFO> saved;
+	std::vector<DISPLAYCONFIG_MODE_INFO> savedModes;
+	for (auto path : paths) {
+		if (isSudoPath(path)) {
+			continue;
+		}
+		for (auto* i : {&path.sourceInfo.modeInfoIdx, &path.targetInfo.modeInfoIdx}) {
+			if (*i != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && *i < modes.size()) {
+				savedModes.push_back(modes[*i]);
+				*i = (UINT32) savedModes.size() - 1;
+			}
+		}
+		saved.push_back(path);
+	}
+	if (saved.empty()) {
+		return;
+	}
+	g_savedPaths = std::move(saved);
+	g_savedModes = std::move(savedModes);
+	g_physicalDisabled = true;  // the layout to restore is saved
+	printf("[SUDOVDA] Monitors' layout saved (%zu on)\n", g_savedPaths.size());
+}
+
 bool keepOnlyVirtualDisplays() {
 	std::lock_guard lock(g_configMutex);
 	std::vector<DISPLAYCONFIG_PATH_INFO> paths;

@@ -72,6 +72,11 @@ namespace VDISPLAY {
 	// Remove every virtual display this process created (the extra screens' too)
 	void removeAllVirtualDisplays();
 
+	// Remember the monitors' layout before a stream adds its first virtual display (Windows may
+	// apply a remembered layout for "monitors + virtual display" with some monitors off, and
+	// that must not become the layout to put back); restorePhysicalDisplays() puts it back
+	void savePhysicalLayout();
+
 	// Switch off every display that isn't a SudoVDA virtual display (never all of them);
 	// restorePhysicalDisplays() switches them back on in the user's usual layout
 	bool keepOnlyVirtualDisplays();

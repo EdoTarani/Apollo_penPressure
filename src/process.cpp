@@ -312,6 +312,11 @@ namespace proc {
           target_fps *= 2;
         }
 
+        if (config::nvhttp.extra_screen_index == 0) {
+          // The monitors as the user has them, to put back when the stream ends
+          VDISPLAY::savePhysicalLayout();
+        }
+
         std::wstring vdisplayName = VDISPLAY::createVirtualDisplay(
           device_uuid_str.c_str(),
           device_name.c_str(),
