@@ -1207,6 +1207,21 @@ namespace nvhttp {
     auto appid = util::from_view(appid_str);
     auto current_appid = proc::proc.running();
     auto current_app_uuid = proc::proc.get_running_app_uuid();
+
+    // An extra screen serves one window of one client: a launch means that window's previous
+    // connection is over, even if it still looks alive (a window closed abruptly only times out
+    // later). End it, as "quit app" does, so this screen starts fresh and gets its display
+    // again instead of resuming without one (and streaming another screen's picture).
+    if (config::nvhttp.extra_screen_index > 0 && current_appid > 0) {
+      BOOST_LOG(info) << "Extra screen: new connection, ending the previous one"sv;
+      rtsp_stream::terminate_sessions();
+      if (proc::proc.running() > 0) {
+        proc::proc.terminate();
+      }
+      current_appid = proc::proc.running();
+      current_app_uuid = proc::proc.get_running_app_uuid();
+    }
+
     bool is_input_only = config::input.enable_input_only_mode && (appid == proc::input_only_app_id || (appuuid_str == REMOTE_INPUT_UUID));
 
     auto named_cert_p = get_verified_cert(request);
