@@ -110,13 +110,24 @@ namespace {
 	};
 
 	bool brokerCall(BrokerRequest& request, BrokerReply& reply) {
-		DWORD read = 0;
-		// Connect, send, receive, disconnect; waits up to 10 s for a free pipe instance
-		if (!CallNamedPipeW(g_brokerPipe.c_str(), &request, sizeof(request), &reply, sizeof(reply), &read, 60000)) {
-			printf("[SUDOVDA] Display broker unreachable (%lu)\n", GetLastError());
-			return false;
+		// Connect, send, receive, disconnect. The broker sets displays up one at a time, so another
+		// screen's request can keep it busy for seconds: keep trying (busy, or briefly no free pipe
+		// instance) for up to 90 s instead of giving up and streaming another screen's display
+		auto start = GetTickCount64();
+		for (int attempt = 1;; ++attempt) {
+			DWORD read = 0;
+			if (CallNamedPipeW(g_brokerPipe.c_str(), &request, sizeof(request), &reply, sizeof(reply), &read, 5000)) {
+				return read == sizeof(reply) && reply.ok;
+			}
+			DWORD error = GetLastError();
+			bool transient = error == ERROR_PIPE_BUSY || error == ERROR_FILE_NOT_FOUND || error == ERROR_SEM_TIMEOUT ||
+				error == ERROR_PIPE_NOT_CONNECTED || error == ERROR_BROKEN_PIPE;
+			if (!transient || GetTickCount64() - start > 90000) {
+				printf("[SUDOVDA] Display broker unreachable (%lu) after %d attempts\n", error, attempt);
+				return false;
+			}
+			Sleep(100);
 		}
-		return read == sizeof(reply) && reply.ok;
 	}
 }
 
@@ -565,6 +576,51 @@ void ensurePhysicalDisplaysOn() {
 	printf("[SUDOVDA] No physical display was on, switched them on: %ld\n", result);
 }
 
+/// Serve one broker client (an extra screen's add/remove request) on its connected pipe
+static void serveBrokerClient(HANDLE pipe) {
+	BrokerRequest request {};
+	BrokerReply reply {};
+	DWORD read = 0, written = 0;
+	if (ReadFile(pipe, &request, sizeof(request), &read, nullptr) && read == sizeof(request)) {
+		request.clientUid[sizeof(request.clientUid) - 1] = 0;
+		request.clientName[sizeof(request.clientName) - 1] = 0;
+		if (request.op == BROKER_ADD) {
+			std::lock_guard lock(g_configMutex);
+			auto name = createVirtualDisplay(request.clientUid, request.clientName,
+				request.width, request.height, request.fps, request.guid);
+			if (!name.empty() && name.size() < CCHDEVICENAME) {
+				// One screen at a time: Windows switches it on, then it takes its place
+				changeDisplaySettings(name.c_str(), request.width, request.height, request.fps);
+				if (!waitForDisplayActive(name.c_str(), 3000)) {
+					wprintf(L"[SUDOVDA] %ls isn't on: extending all displays\n", name.c_str());
+					extendAllDisplays();
+					waitForDisplayActive(name.c_str(), 3000);
+				}
+				if (request.screen >= 2) {
+					setDisplaySlot(name.c_str(), (int) request.screen - 1);
+				}
+				if (g_keepPhysicalOff) {
+					keepOnlyVirtualDisplays();
+				}
+				if (g_brokerArrange) {
+					layoutRow();
+				}
+				wprintf(L"[SUDOVDA] Screen %u: %ls. Displays on: %ls\n", request.screen, name.c_str(), describeDisplays().c_str());
+				wcscpy_s(reply.deviceName, name.c_str());
+				reply.ok = 1;
+			} else {
+				printf("[SUDOVDA] Screen %u: no display\n", request.screen);
+			}
+		} else if (request.op == BROKER_REMOVE) {
+			reply.ok = removeVirtualDisplay(request.guid) ? 1 : 0;
+		}
+		WriteFile(pipe, &reply, sizeof(reply), &written, nullptr);
+		FlushFileBuffers(pipe);
+	}
+	DisconnectNamedPipe(pipe);
+	CloseHandle(pipe);
+}
+
 void startDisplayBroker(const std::wstring& pipeName, bool arrange) {
 	g_brokerArrange = arrange;
 	std::thread([pipeName] {
@@ -580,46 +636,13 @@ void startDisplayBroker(const std::wstring& pipeName, bool arrange) {
 			}
 
 			if (ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) {
-				BrokerRequest request {};
-				BrokerReply reply {};
-				DWORD read = 0, written = 0;
-				if (ReadFile(pipe, &request, sizeof(request), &read, nullptr) && read == sizeof(request)) {
-					request.clientUid[sizeof(request.clientUid) - 1] = 0;
-					request.clientName[sizeof(request.clientName) - 1] = 0;
-					if (request.op == BROKER_ADD) {
-						std::lock_guard lock(g_configMutex);
-						auto name = createVirtualDisplay(request.clientUid, request.clientName,
-							request.width, request.height, request.fps, request.guid);
-						if (!name.empty() && name.size() < CCHDEVICENAME) {
-							// One screen at a time: Windows switches it on, then it takes its place
-							changeDisplaySettings(name.c_str(), request.width, request.height, request.fps);
-							if (!waitForDisplayActive(name.c_str(), 3000)) {
-								wprintf(L"[SUDOVDA] %ls isn't on: extending all displays\n", name.c_str());
-								extendAllDisplays();
-								waitForDisplayActive(name.c_str(), 3000);
-							}
-							if (request.screen >= 2) {
-								setDisplaySlot(name.c_str(), (int) request.screen - 1);
-							}
-							if (g_keepPhysicalOff) {
-								keepOnlyVirtualDisplays();
-							}
-							if (g_brokerArrange) {
-								layoutRow();
-							}
-							wprintf(L"[SUDOVDA] Displays on: %ls\n", describeDisplays().c_str());
-							wcscpy_s(reply.deviceName, name.c_str());
-							reply.ok = 1;
-						}
-					} else if (request.op == BROKER_REMOVE) {
-						reply.ok = removeVirtualDisplay(request.guid) ? 1 : 0;
-					}
-					WriteFile(pipe, &reply, sizeof(reply), &written, nullptr);
-					FlushFileBuffers(pipe);
-				}
-				DisconnectNamedPipe(pipe);
+				// Serve it on its own thread, so the next instance listens right away: a screen
+				// asking while another is being set up waits for its turn (the display changes
+				// themselves are serialized) instead of finding no pipe
+				std::thread(serveBrokerClient, pipe).detach();
+			} else {
+				CloseHandle(pipe);
 			}
-			CloseHandle(pipe);
 		}
 	}).detach();
 }
