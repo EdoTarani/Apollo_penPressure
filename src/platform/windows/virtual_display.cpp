@@ -157,10 +157,12 @@ namespace {
 
 	void saveArrangement() {
 		if (g_arrangementFile.empty()) {
+			printf("[SUDOVDA] Arrangement not saved: no file\n");
 			return;
 		}
 		FILE* file = _wfopen(g_arrangementFile.c_str(), L"w");
 		if (file == nullptr) {
+			wprintf(L"[SUDOVDA] Arrangement not saved: can't write %ls\n", g_arrangementFile.c_str());
 			return;
 		}
 		for (auto& [slot, placement] : g_arrangement) {
@@ -203,6 +205,8 @@ namespace {
 		g_peakScreens = (std::max)(g_peakScreens, screens.size());
 		auto main = screens.find(0);
 		if (main == screens.end() || screens.size() < 2 || screens.size() < g_peakScreens) {
+			printf("[SUDOVDA] Arrangement not kept: screen 1 %s, %zu of %zu screens on (%zu known)\n",
+				main == screens.end() ? "not on" : "on", screens.size(), g_peakScreens, g_slots.size());
 			return;
 		}
 		RECT m = main->second;
@@ -231,6 +235,8 @@ namespace {
 		std::map<char, int> ranks;
 		for (auto& s : seen) {
 			g_arrangement[s.slot] = {s.side, ranks[s.side]++, std::clamp(s.offset, -0.9, 0.9)};
+			printf("[SUDOVDA] Arrangement kept: screen %d %c of screen 1 (#%d, offset %.2f)\n", s.slot + 1, s.side,
+				g_arrangement[s.slot].rank, g_arrangement[s.slot].offset);
 		}
 		saveArrangement();
 	}
