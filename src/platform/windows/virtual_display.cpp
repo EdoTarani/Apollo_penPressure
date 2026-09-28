@@ -23,6 +23,7 @@
 using namespace SUDOVDA;
 
 namespace VDISPLAY {
+bool activateTarget(const LUID& adapter, UINT32 targetId, const std::wstring& preferredSource = std::wstring());
 // {dff7fd29-5b75-41d1-9731-b32a17a17104}
 // static const GUID DEFAULT_DISPLAY_GUID = { 0xdff7fd29, 0x5b75, 0x41d1, { 0x97, 0x31, 0xb3, 0x2a, 0x17, 0xa1, 0x71, 0x04 } };
 
@@ -45,6 +46,8 @@ namespace {
 	std::map<std::string, DWORD> g_owners;
 	// The resolution (width, height, refresh in mHz) each display's stream asked for, by GUID
 	std::map<std::string, std::array<int, 3>> g_wantedModes;
+	// Each display's adapter and target, by GUID: to switch it back on if Windows switches it off
+	std::map<std::string, std::pair<LUID, UINT32>> g_targets;
 
 	std::string guidKey(const GUID& guid) {
 		return std::string(reinterpret_cast<const char*>(&guid), sizeof(GUID));
@@ -417,6 +420,44 @@ namespace {
 	}
 
 	/**
+	* All our displays on. When a display arrives, Windows can re-apply what it remembers for that
+	* set of displays and put the new one in another's place, switching that one off: its screen
+	* then streams another screen's display. Each goes back on, on its own source if it's free (so
+	* it keeps its name). Caller holds g_configMutex. True if one was switched back on.
+	*/
+	bool ensureOwnDisplaysOn() {
+		std::vector<std::tuple<LUID, UINT32, std::wstring>> ours;
+		{
+			std::lock_guard lock(g_createdMutex);
+			for (auto& [key, target] : g_targets) {
+				auto name = g_created.find(key);
+				ours.push_back({target.first, target.second, name != g_created.end() ? name->second : std::wstring()});
+			}
+		}
+		if (ours.empty()) {
+			return false;
+		}
+		std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+		std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+		if (!activePaths(paths, modes)) {
+			return false;
+		}
+		bool switched = false;
+		for (auto& [adapter, target, name] : ours) {
+			bool on = false;
+			for (auto& path : paths) {
+				on = on || (path.targetInfo.id == target && path.targetInfo.adapterId.LowPart == adapter.LowPart &&
+					path.targetInfo.adapterId.HighPart == adapter.HighPart);
+			}
+			if (!on) {
+				wprintf(L"[SUDOVDA] %ls (target %u) was switched off: back on\n", name.c_str(), target);
+				switched = activateTarget(adapter, target, name) || switched;
+			}
+		}
+		return switched;
+	}
+
+	/**
 	* Hold our displays as they are now for a few seconds (caller holds g_configMutex). When a
 	* display arrives, Windows re-applies the layout and resolutions it remembers for that set of
 	* displays, a moment after ours (a screen then comes back in a row, or at another session's
@@ -438,6 +479,14 @@ namespace {
 				std::lock_guard lock(g_configMutex);
 				// All session long, every 2 s: each screen at its stream's resolution
 				if (++ticks % 4 == 0 && virtualDisplayCount() > 0) {
+					if (ensureOwnDisplaysOn()) {
+						if (g_keepPhysicalOff) {
+							keepOnlyVirtualDisplays();
+						}
+						if (g_brokerArrange) {
+							layoutRow();
+						}
+					}
 					enforceWantedModes();
 				}
 				if (g_heldLayout.empty() || GetTickCount64() > g_holdUntil) {
@@ -569,7 +618,7 @@ bool extendAllDisplays() {
  * remembered layout in which this monitor was off: its path joins the active configuration with
  * a free source, and the result is remembered (so Windows switches it on by itself next time).
  */
-bool activateTarget(const LUID& adapter, UINT32 targetId) {
+bool activateTarget(const LUID& adapter, UINT32 targetId, const std::wstring& preferredSource) {
 	std::lock_guard lock(g_configMutex);
 	UINT32 pathCount = 0, modeCount = 0;
 	if (GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) {
@@ -593,6 +642,8 @@ bool activateTarget(const LUID& adapter, UINT32 targetId) {
 		}
 	}
 
+	// A free source for it: the one it had (its name) if that's free
+	const DISPLAYCONFIG_PATH_INFO* chosen = nullptr;
 	for (auto& candidate : paths) {
 		if ((candidate.flags & DISPLAYCONFIG_PATH_ACTIVE) || !candidate.targetInfo.targetAvailable ||
 			!sameLuid(candidate.targetInfo.adapterId, adapter) || candidate.targetInfo.id != targetId) {
@@ -608,7 +659,17 @@ bool activateTarget(const LUID& adapter, UINT32 targetId) {
 		if (sourceTaken) {
 			continue;
 		}
+		if (chosen == nullptr) {
+			chosen = &candidate;
+		}
+		if (!preferredSource.empty() && _wcsicmp(sourceName(candidate).c_str(), preferredSource.c_str()) == 0) {
+			chosen = &candidate;
+			break;
+		}
+	}
 
+	if (chosen != nullptr) {
+		const auto& candidate = *chosen;
 		auto path = candidate;
 		path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
 		path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
@@ -1171,6 +1232,7 @@ static void serveBrokerClient(HANDLE pipe) {
 				if (request.screen >= 2) {
 					setDisplaySlot(name.c_str(), (int) request.screen - 1);
 				}
+				ensureOwnDisplaysOn();
 				if (g_keepPhysicalOff) {
 					keepOnlyVirtualDisplays();
 				}
@@ -1955,6 +2017,7 @@ std::wstring createVirtualDisplay(
 				mode.dmPelsWidth, mode.dmPelsHeight, width, height);
 			replaced = existing->second;
 			g_created.erase(existing);
+			g_targets.erase(guidKey(guid));
 		}
 	}
 	if (!replaced.empty()) {
@@ -1970,12 +2033,16 @@ std::wstring createVirtualDisplay(
 	// display (no orphans) and add it once more
 	wchar_t deviceName[CCHDEVICENAME]{};
 	bool named = false;
+	LUID addedAdapter {};
+	UINT32 addedTarget = 0;
 	for (int attempt = 0; attempt < 2 && !named; ++attempt) {
 		VIRTUAL_DISPLAY_ADD_OUT output;
 		if (!AddVirtualDisplay(SUDOVDA_DRIVER_HANDLE, width, height, fps, guid, s_client_name, s_client_uid, output)) {
 			printf("[SUDOVDA] Failed to add virtual display.\n");
 			return std::wstring();
 		}
+		addedAdapter = output.AdapterLuid;
+		addedTarget = output.TargetId;
 
 		uint32_t retryInterval = 20, waited = 0;
 		bool extended = false, copy = false;
@@ -2010,6 +2077,7 @@ std::wstring createVirtualDisplay(
 		std::lock_guard lock(g_createdMutex);
 		g_created[guidKey(guid)] = deviceName;
 		g_wantedModes[guidKey(guid)] = {(int) width, (int) height, (int) fps};
+		g_targets[guidKey(guid)] = {addedAdapter, addedTarget};
 	}
 
 	return std::wstring(deviceName);
@@ -2046,6 +2114,7 @@ bool removeVirtualDisplay(const GUID& guid) {
 		}
 		g_owners.erase(guidKey(guid));
 		g_wantedModes.erase(guidKey(guid));
+		g_targets.erase(guidKey(guid));
 		noneLeft = g_created.empty();
 	}
 	if (!removedName.empty()) {
