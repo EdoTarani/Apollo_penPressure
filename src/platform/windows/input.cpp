@@ -1308,22 +1308,22 @@ namespace platf {
       return;
     }
 
-    // Send all key down events
+    // Typed like a person does: each character pressed and released, a few at a time. All the
+    // key downs first and then all the key ups (as before) lost everything after the first ~60
+    // characters of a pasted paragraph in Notepad.
     for (int i = 0; i < chars; i++) {
       INPUT input {};
       input.type = INPUT_KEYBOARD;
       input.ki.wScan = wide[i];
       input.ki.dwFlags = KEYEVENTF_UNICODE;
       send_input(input);
-    }
-
-    // Send all key up events
-    for (int i = 0; i < chars; i++) {
-      INPUT input {};
-      input.type = INPUT_KEYBOARD;
-      input.ki.wScan = wide[i];
       input.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
       send_input(input);
+
+      // Let the app take them in (not between the two halves of a surrogate pair)
+      if (i % 16 == 15 && !IS_HIGH_SURROGATE(wide[i])) {
+        Sleep(2);
+      }
     }
   }
 
