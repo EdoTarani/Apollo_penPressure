@@ -573,7 +573,14 @@ bool activateTarget(const LUID& adapter, UINT32 targetId) {
 		path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
 		path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
 		path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
-		auto config = active;
+		// Without the path it's on now, if any: Windows can switch a new display on as a copy of
+		// another one (it remembered that for this set of displays), and a target can't be on twice
+		std::vector<DISPLAYCONFIG_PATH_INFO> config;
+		for (auto& other : active) {
+			if (!sameLuid(other.targetInfo.adapterId, adapter) || other.targetInfo.id != targetId) {
+				config.push_back(other);
+			}
+		}
 		config.push_back(path);
 		LONG result = SetDisplayConfig((UINT32) config.size(), config.data(), (UINT32) modes.size(), modes.data(),
 			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
@@ -1826,7 +1833,7 @@ bool setRenderAdapterByName(const std::wstring& adapterName) {
  * was still coming on it could match a monitor's path and return another screen's display.
  * A name another of our displays has is never returned.
  */
-static bool addedDisplayName(const VIRTUAL_DISPLAY_ADD_OUT& added, const GUID& guid, wchar_t* deviceName) {
+static bool addedDisplayName(const VIRTUAL_DISPLAY_ADD_OUT& added, const GUID& guid, wchar_t* deviceName, bool& copy) {
 	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
 	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
 	if (!activePaths(paths, modes)) {
@@ -1844,7 +1851,10 @@ static bool addedDisplayName(const VIRTUAL_DISPLAY_ADD_OUT& added, const GUID& g
 		std::lock_guard lock(g_createdMutex);
 		for (auto& [key, other] : g_created) {
 			if (key != guidKey(guid) && _wcsicmp(other.c_str(), name.c_str()) == 0) {
-				wprintf(L"[SUDOVDA] New display reported as %ls, another screen's: waiting\n", name.c_str());
+				if (!copy) {
+					wprintf(L"[SUDOVDA] New display is on as a copy of %ls (another screen's): giving it its own\n", name.c_str());
+				}
+				copy = true;
 				return false;
 			}
 		}
@@ -1928,8 +1938,8 @@ std::wstring createVirtualDisplay(
 		}
 
 		uint32_t retryInterval = 20, waited = 0;
-		bool extended = false;
-		while (!(named = addedDisplayName(output, guid, deviceName)) && waited < 8000) {
+		bool extended = false, copy = false;
+		while (!(named = addedDisplayName(output, guid, deviceName, copy)) && waited < 8000) {
 			Sleep(retryInterval);
 			waited += retryInterval;
 			retryInterval = (std::min)(retryInterval * 2, 500u);
@@ -1937,7 +1947,7 @@ std::wstring createVirtualDisplay(
 			// A display that stays off gets no name. After the monitors were switched off with a
 			// supplied layout, Windows leaves the next new display off: switch everything on
 			// (the caller switches the monitors off again afterwards)
-			if (!extended && waited >= 1500) {
+			if (!extended && (waited >= 1500 || copy)) {
 				extended = true;
 				if (!activateTarget(output.AdapterLuid, output.TargetId)) {
 					extendAllDisplays();
