@@ -1820,6 +1820,40 @@ bool setRenderAdapterByName(const std::wstring& adapterName) {
 	return false;
 }
 
+/**
+ * The GDI name of the display just added, once it's on. Its path is matched by adapter and target:
+ * target ids are per adapter, and the SudoVDA helper matched the id alone, so while the new display
+ * was still coming on it could match a monitor's path and return another screen's display.
+ * A name another of our displays has is never returned.
+ */
+static bool addedDisplayName(const VIRTUAL_DISPLAY_ADD_OUT& added, const GUID& guid, wchar_t* deviceName) {
+	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+	if (!activePaths(paths, modes)) {
+		return false;
+	}
+	for (auto& path : paths) {
+		if (path.targetInfo.id != added.TargetId || path.targetInfo.adapterId.LowPart != added.AdapterLuid.LowPart ||
+			path.targetInfo.adapterId.HighPart != added.AdapterLuid.HighPart) {
+			continue;
+		}
+		auto name = sourceName(path);
+		if (name.empty()) {
+			return false;
+		}
+		std::lock_guard lock(g_createdMutex);
+		for (auto& [key, other] : g_created) {
+			if (key != guidKey(guid) && _wcsicmp(other.c_str(), name.c_str()) == 0) {
+				wprintf(L"[SUDOVDA] New display reported as %ls, another screen's: waiting\n", name.c_str());
+				return false;
+			}
+		}
+		wcscpy_s(deviceName, CCHDEVICENAME, name.c_str());
+		return true;
+	}
+	return false;
+}
+
 std::wstring createVirtualDisplay(
 	const char* s_client_uid,
 	const char* s_client_name,
@@ -1895,7 +1929,7 @@ std::wstring createVirtualDisplay(
 
 		uint32_t retryInterval = 20, waited = 0;
 		bool extended = false;
-		while (!(named = GetAddedDisplayName(output, deviceName)) && waited < 8000) {
+		while (!(named = addedDisplayName(output, guid, deviceName)) && waited < 8000) {
 			Sleep(retryInterval);
 			waited += retryInterval;
 			retryInterval = (std::min)(retryInterval * 2, 500u);
