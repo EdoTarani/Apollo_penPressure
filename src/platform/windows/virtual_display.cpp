@@ -352,20 +352,56 @@ namespace {
 	}
 
 	/**
-	* Our displays back at the resolution their streams asked for. When another display
-	* arrives, Windows re-applies the resolutions it remembers for that set of displays, which
-	* can put a screen that's already streaming back to an earlier session's resolution (the
-	* stream then shows it scaled). Caller holds g_configMutex.
+	* Our displays back at their recommended resolution: each is created with the resolution its
+	* stream asked for as its preferred mode, so that's the stream's, read from the display itself
+	* (a mix-up of display names can't give it another screen's). When another display arrives,
+	* Windows re-applies the resolutions it remembers for that set of displays, which can put a
+	* screen that's already streaming at an earlier session's resolution (the stream then shows it
+	* scaled). The refresh rate is the one asked for. Caller holds g_configMutex.
 	*/
 	void enforceWantedModes() {
-		std::vector<std::pair<std::wstring, std::array<int, 3>>> wanted;
+		std::map<std::wstring, std::array<int, 3>> asked;
 		{
 			std::lock_guard lock(g_createdMutex);
 			for (auto& [key, name] : g_created) {
 				auto mode = g_wantedModes.find(key);
 				if (mode != g_wantedModes.end()) {
-					wanted.push_back({name, mode->second});
+					asked[name] = mode->second;
 				}
+			}
+		}
+		std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+		std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+		if (!activePaths(paths, modes)) {
+			return;
+		}
+		std::vector<std::pair<std::wstring, std::array<int, 3>>> wanted;
+		for (auto& path : paths) {
+			auto name = sourceName(path);
+			if (name.empty() || !isSudoAdapter(name.c_str())) {
+				continue;
+			}
+			auto known = asked.find(name);
+			std::array<int, 3> mode = known != asked.end() ? known->second : std::array<int, 3> {0, 0, 0};
+			DISPLAYCONFIG_TARGET_PREFERRED_MODE preferred {};
+			preferred.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE;
+			preferred.header.size = sizeof(preferred);
+			preferred.header.adapterId = path.targetInfo.adapterId;
+			preferred.header.id = path.targetInfo.id;
+			if (DisplayConfigGetDeviceInfo(&preferred.header) == ERROR_SUCCESS && preferred.width > 0 && preferred.height > 0) {
+				if (known != asked.end() && ((int) preferred.width != mode[0] || (int) preferred.height != mode[1])) {
+					wprintf(L"[SUDOVDA] %ls: recommended %ux%u, %dx%d asked: the recommended one\n", name.c_str(),
+						preferred.width, preferred.height, mode[0], mode[1]);
+				}
+				mode[0] = (int) preferred.width;
+				mode[1] = (int) preferred.height;
+				if (mode[2] == 0) {
+					auto& vsync = preferred.targetMode.targetVideoSignalInfo.vSyncFreq;
+					mode[2] = vsync.Denominator ? (int) ((unsigned long long) vsync.Numerator * 1000 / vsync.Denominator) : 60000;
+				}
+			}
+			if (mode[0] > 0 && mode[1] > 0) {
+				wanted.push_back({name, mode});
 			}
 		}
 		for (auto& [name, mode] : wanted) {
@@ -397,9 +433,13 @@ namespace {
 		}
 		g_holdThreadStarted = true;
 		std::thread([] {
-			for (;;) {
+			for (unsigned ticks = 0;;) {
 				Sleep(500);
 				std::lock_guard lock(g_configMutex);
+				// All session long, every 2 s: each screen at its stream's resolution
+				if (++ticks % 4 == 0 && virtualDisplayCount() > 0) {
+					enforceWantedModes();
+				}
 				if (g_heldLayout.empty() || GetTickCount64() > g_holdUntil) {
 					continue;
 				}
