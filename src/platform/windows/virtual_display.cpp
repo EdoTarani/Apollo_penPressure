@@ -61,18 +61,18 @@ namespace {
 	// Screen of each virtual display (0 = screen 1), for the row layout
 	std::map<std::wstring, int> g_slots;
 
-	// How the user arranged the virtual screens (display settings), kept for the next streams: per
-	// screen (slot 1, 2 = screens 2, 3) the side of screen 1 it's on ('R', 'L', 'B', 'T'), its
-	// order on that side, and its offset along screen 1's edge as a fraction of screen 1's size,
-	// so it holds when the resolutions change
-	struct Placement {
-		char side = 'R';
-		int rank = 0;
-		double offset = 0;
-	};
-	std::map<int, Placement> g_arrangement;
+	// How the user arranged the virtual screens (display settings), kept for the next streams:
+	// each screen's rectangle (slot 0 = screen 1), relative to screen 1's top-left corner
+	std::map<int, RECT> g_arrangement;
 	std::wstring g_arrangementFile;
 	size_t g_peakScreens = 0;  // most of our displays on at once in this stream: a full arrangement
+
+	// Our displays as last laid out (by GDI name), held for a few seconds (see holdLayout())
+	std::map<std::wstring, RECT> g_heldLayout;
+	bool g_holdArrange = false;
+	ULONGLONG g_holdUntil = 0;
+	int g_holdRepairs = 0;
+	bool g_holdThreadStarted = false;
 
 	// The physical monitors' exact layout before they were switched off, to put back
 	std::vector<DISPLAYCONFIG_PATH_INFO> g_savedPaths;
@@ -165,15 +165,15 @@ namespace {
 			wprintf(L"[SUDOVDA] Arrangement not saved: can't write %ls\n", g_arrangementFile.c_str());
 			return;
 		}
-		for (auto& [slot, placement] : g_arrangement) {
-			fprintf(file, "%d %c %d %.4f\n", slot, placement.side, placement.rank, placement.offset);
+		for (auto& [slot, rc] : g_arrangement) {
+			fprintf(file, "%d %ld %ld %ld %ld\n", slot, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
 		}
 		fclose(file);
 	}
 
-	/// Our virtual displays that are on, by screen slot: their desktop rectangles (caller holds g_configMutex)
-	std::map<int, RECT> slottedDisplays() {
-		std::map<int, RECT> result;
+	/// Our (SudoVDA) displays that are on, by GDI name: their desktop rectangles (caller holds g_configMutex)
+	std::map<std::wstring, RECT> sudoDisplays() {
+		std::map<std::wstring, RECT> result;
 		std::vector<DISPLAYCONFIG_PATH_INFO> paths;
 		std::vector<DISPLAYCONFIG_MODE_INFO> modes;
 		if (!activePaths(paths, modes)) {
@@ -185,20 +185,40 @@ namespace {
 				continue;
 			}
 			auto name = sourceName(path);
-			auto slot = g_slots.find(name);
-			if (slot == g_slots.end() || !isSudoAdapter(name.c_str())) {
+			if (name.empty() || !isSudoAdapter(name.c_str())) {
 				continue;
 			}
 			auto& mode = modes[idx].sourceMode;
-			result[slot->second] = {mode.position.x, mode.position.y, mode.position.x + (LONG) mode.width, mode.position.y + (LONG) mode.height};
+			result[name] = {mode.position.x, mode.position.y, mode.position.x + (LONG) mode.width, mode.position.y + (LONG) mode.height};
 		}
 		return result;
 	}
 
+	/// Our virtual displays that are on, by screen slot: their desktop rectangles (caller holds g_configMutex)
+	std::map<int, RECT> slottedDisplays() {
+		std::map<int, RECT> result;
+		for (auto& [name, rc] : sudoDisplays()) {
+			auto slot = g_slots.find(name);
+			if (slot != g_slots.end()) {
+				result[slot->second] = rc;
+			}
+		}
+		return result;
+	}
+
+	std::wstring rectText(const RECT& rc) {
+		return std::to_wstring(rc.left) + L"," + std::to_wstring(rc.top) + L" " + std::to_wstring(rc.right - rc.left) + L"x" +
+			std::to_wstring(rc.bottom - rc.top);
+	}
+
+	bool overlap(const RECT& a, const RECT& b) {
+		return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+	}
+
 	/**
 	* Remember how the screens are arranged now (the user may have moved them in the display
-	* settings), before one of them goes. Only a full arrangement: all the screens this stream
-	* had, with screen 1. Caller holds g_configMutex.
+	* settings), before one of them goes: each one's exact rectangle, relative to screen 1. Only a
+	* full arrangement: all the screens this stream had, with screen 1. Caller holds g_configMutex.
 	*/
 	void captureArrangement() {
 		auto screens = slottedDisplays();
@@ -210,35 +230,125 @@ namespace {
 			return;
 		}
 		RECT m = main->second;
-		double w1 = m.right - m.left, h1 = m.bottom - m.top;
-		struct Seen {
-			int slot;
-			char side;
-			double distance;
-			double offset;
-		};
-		std::vector<Seen> seen;
+		std::map<int, RECT> arrangement;
 		for (auto& [slot, rc] : screens) {
-			if (slot == 0) {
+			arrangement[slot] = {rc.left - m.left, rc.top - m.top, rc.right - m.left, rc.bottom - m.top};
+			wprintf(L"[SUDOVDA] Arrangement kept: screen %d at %ls\n", slot + 1, rectText(arrangement[slot]).c_str());
+		}
+		// A screen this stream didn't have keeps its place, unless one of these took it
+		for (auto& [slot, rc] : g_arrangement) {
+			bool free = arrangement.find(slot) == arrangement.end();
+			for (auto& [other, taken] : arrangement) {
+				free = free && !overlap(rc, taken);
+			}
+			if (free) {
+				arrangement[slot] = rc;
+			}
+		}
+		g_arrangement = std::move(arrangement);
+		saveArrangement();
+	}
+
+	/**
+	* Where the screens go (slot -> rectangle, screen 1 at 0,0) at their sizes now, following the
+	* remembered arrangement: each screen goes against the one it touched there, on the same side,
+	* lined up the same way (tops, bottoms, centers, else the same offset: in proportion if that
+	* screen's size changed). With the sizes unchanged, that's exactly the remembered layout. A
+	* screen that can't be placed that way goes right of the others.
+	*/
+	std::map<int, RECT> arrangeScreens(const std::map<int, SIZE>& sizes, const std::map<int, RECT>& saved) {
+		std::map<int, RECT> placed;
+		auto first = sizes.find(0);
+		if (first == sizes.end()) {
+			return placed;
+		}
+		placed[0] = {0, 0, first->second.cx, first->second.cy};
+
+		// Along one axis: where a screen of length `length` goes, next to one now at `at` (length
+		// `atLength`), lined up as they were (the screen was a0..a1, that one b0..b1)
+		auto lineUp = [](LONG a0, LONG a1, LONG b0, LONG b1, LONG at, LONG atLength, LONG length) -> LONG {
+			if (a0 == b0) {
+				return at;
+			}
+			if (a1 == b1) {
+				return at + atLength - length;
+			}
+			if (a0 + a1 == b0 + b1) {
+				return at + (atLength - length) / 2;
+			}
+			LONG offset = a0 - b0;
+			if (b1 - b0 != atLength) {
+				offset = (LONG) std::lround((double) offset * atLength / (b1 - b0));
+			}
+			// Still side by side
+			return std::clamp(at + offset, at - length + 1, at + atLength - 1);
+		};
+
+		for (bool progress = true; progress;) {
+			progress = false;
+			for (auto& [slot, size] : sizes) {
+				auto was = saved.find(slot);
+				if (placed.count(slot) || was == saved.end()) {
+					continue;
+				}
+				const RECT& s = was->second;
+				// The screens it touched that are placed, the longest shared edge first
+				std::vector<std::pair<LONG, int>> neighbors;
+				for (auto& [other, rc] : placed) {
+					auto o = saved.find(other);
+					if (o == saved.end()) {
+						continue;
+					}
+					const RECT& n = o->second;
+					LONG sharedV = (std::min)(s.bottom, n.bottom) - (std::max)(s.top, n.top);
+					LONG sharedH = (std::min)(s.right, n.right) - (std::max)(s.left, n.left);
+					if ((s.left == n.right || s.right == n.left) && sharedV > 0) {
+						neighbors.push_back({sharedV, other});
+					} else if ((s.top == n.bottom || s.bottom == n.top) && sharedH > 0) {
+						neighbors.push_back({sharedH, other});
+					}
+				}
+				std::stable_sort(neighbors.begin(), neighbors.end(), [](auto& a, auto& b) { return a.first > b.first; });
+				for (auto& [shared, other] : neighbors) {
+					const RECT& n = saved.at(other);
+					const RECT& p = placed.at(other);
+					LONG w = size.cx, h = size.cy;
+					RECT rc;
+					if (s.left == n.right || s.right == n.left) {
+						LONG x = s.left == n.right ? p.right : p.left - w;
+						LONG y = lineUp(s.top, s.bottom, n.top, n.bottom, p.top, p.bottom - p.top, h);
+						rc = {x, y, x + w, y + h};
+					} else {
+						LONG y = s.top == n.bottom ? p.bottom : p.top - h;
+						LONG x = lineUp(s.left, s.right, n.left, n.right, p.left, p.right - p.left, w);
+						rc = {x, y, x + w, y + h};
+					}
+					bool free = true;
+					for (auto& [placedSlot, taken] : placed) {
+						free = free && !overlap(rc, taken);
+					}
+					if (free) {
+						placed[slot] = rc;
+						progress = true;
+						break;
+					}
+				}
+			}
+		}
+
+		for (auto& [slot, size] : sizes) {
+			if (placed.count(slot)) {
 				continue;
 			}
-			double dx = (rc.left + rc.right) / 2.0 - (m.left + m.right) / 2.0;
-			double dy = (rc.top + rc.bottom) / 2.0 - (m.top + m.bottom) / 2.0;
-			double w = rc.right - rc.left, h = rc.bottom - rc.top;
-			if (std::abs(dx) / ((w1 + w) / 2) >= std::abs(dy) / ((h1 + h) / 2)) {
-				seen.push_back({slot, dx > 0 ? 'R' : 'L', std::abs(dx), (rc.top - m.top) / h1});
-			} else {
-				seen.push_back({slot, dy > 0 ? 'B' : 'T', std::abs(dy), (rc.left - m.left) / w1});
+			RECT last = placed.begin()->second;
+			for (auto& [other, rc] : placed) {
+				if (rc.right > last.right) {
+					last = rc;
+				}
 			}
+			placed[slot] = {last.right, last.top, last.right + size.cx, last.top + size.cy};
 		}
-		std::sort(seen.begin(), seen.end(), [](auto& a, auto& b) { return a.distance < b.distance; });
-		std::map<char, int> ranks;
-		for (auto& s : seen) {
-			g_arrangement[s.slot] = {s.side, ranks[s.side]++, std::clamp(s.offset, -0.9, 0.9)};
-			printf("[SUDOVDA] Arrangement kept: screen %d %c of screen 1 (#%d, offset %.2f)\n", s.slot + 1, s.side,
-				g_arrangement[s.slot].rank, g_arrangement[s.slot].offset);
-		}
-		saveArrangement();
+		return placed;
 	}
 
 	/**
@@ -268,6 +378,63 @@ namespace {
 			wprintf(L"[SUDOVDA] %ls went to %lux%lu: back to %dx%d\n", name.c_str(), current.dmPelsWidth, current.dmPelsHeight, mode[0], mode[1]);
 			changeDisplaySettings(name.c_str(), mode[0], mode[1], mode[2]);
 		}
+	}
+
+	/**
+	* Hold our displays as they are now for a few seconds (caller holds g_configMutex). When a
+	* display arrives, Windows re-applies the layout and resolutions it remembers for that set of
+	* displays, a moment after ours (a screen then comes back in a row, or at another session's
+	* resolution): while the same displays are on, what it changes is put back, a few times at most.
+	* `arrange`: the layout is ours to set (else only the resolutions).
+	*/
+	void holdLayout(bool arrange) {
+		g_heldLayout = sudoDisplays();
+		g_holdArrange = arrange;
+		g_holdUntil = GetTickCount64() + 12000;
+		g_holdRepairs = 0;
+		if (g_holdThreadStarted) {
+			return;
+		}
+		g_holdThreadStarted = true;
+		std::thread([] {
+			for (;;) {
+				Sleep(500);
+				std::lock_guard lock(g_configMutex);
+				if (g_heldLayout.empty() || GetTickCount64() > g_holdUntil) {
+					continue;
+				}
+				auto now = sudoDisplays();
+				bool sameDisplays = now.size() == g_heldLayout.size();
+				std::wstring changed;
+				for (auto& [name, rc] : g_heldLayout) {
+					auto current = now.find(name);
+					if (current == now.end()) {
+						sameDisplays = false;
+						break;
+					}
+					if (!EqualRect(&current->second, &rc)) {
+						changed += name + L" " + rectText(current->second) + L" (was " + rectText(rc) + L") ";
+					}
+				}
+				if (!sameDisplays || changed.empty()) {
+					continue;  // a display arriving or going gets its own layout
+				}
+				if (g_holdRepairs >= 4) {
+					wprintf(L"[SUDOVDA] Windows keeps changing the screens: %ls- leaving them\n", changed.c_str());
+					g_heldLayout.clear();
+					continue;
+				}
+				int repairs = g_holdRepairs + 1;
+				wprintf(L"[SUDOVDA] Windows changed the screens: %ls- putting them back\n", changed.c_str());
+				if (g_holdArrange) {
+					layoutRow();  // holds the result again
+				} else {
+					enforceWantedModes();
+					holdLayout(false);
+				}
+				g_holdRepairs = repairs;
+			}
+		}).detach();
 	}
 
 	enum : uint32_t { BROKER_ADD = 1, BROKER_REMOVE = 2 };
@@ -316,15 +483,17 @@ void setArrangementFile(const std::wstring& path) {
 	if (file == nullptr) {
 		return;
 	}
-	int slot = 0, rank = 0;
-	char side = 0;
-	double offset = 0;
-	while (fscanf(file, "%d %c %d %lf", &slot, &side, &rank, &offset) == 4) {
-		if (slot >= 1 && slot <= 8 && strchr("RLBT", side) != nullptr) {
-			g_arrangement[slot] = {side, rank, std::clamp(offset, -0.9, 0.9)};
+	// "slot x y width height" per screen; lines of the older format (a side letter) are skipped
+	char line[128];
+	while (fgets(line, sizeof(line), file) != nullptr) {
+		int slot = 0;
+		LONG x = 0, y = 0, w = 0, h = 0;
+		if (sscanf(line, "%d %ld %ld %ld %ld", &slot, &x, &y, &w, &h) == 5 && slot >= 0 && slot <= 8 && w > 0 && h > 0) {
+			g_arrangement[slot] = {x, y, x + w, y + h};
 		}
 	}
 	fclose(file);
+	printf("[SUDOVDA] Remembered arrangement: %zu screens\n", g_arrangement.size());
 }
 
 void useDisplayBroker(const std::wstring& pipeName, int screenIndex) {
@@ -725,8 +894,8 @@ bool layoutRow() {
 		return false;
 	}
 
-	// Screen 1 at 0,0 (the main display); the others where the user arranged them last time (their
-	// side of screen 1, in order), else in a row right of it by screen number. If the remembered
+	// Screen 1 at 0,0 (the main display); the others where the user arranged them last time
+	// (arrangeScreens()), else in a row right of it by screen number. If the remembered
 	// arrangement doesn't apply, the row.
 	std::sort(virtuals.begin(), virtuals.end(), [](auto& a, auto& b) { return a.slot < b.slot; });
 	const auto originalModes = modes;
@@ -736,42 +905,21 @@ bool layoutRow() {
 		summary.clear();
 		LONG minX = 0;
 		if (remembered && virtuals.front().slot == 0) {
-			auto& first = modes[virtuals.front().mode].sourceMode;
-			first.position = {0, 0};
-			LONG w1 = (LONG) first.width, h1 = (LONG) first.height;
-			summary += virtuals.front().name + L" ";
-			std::vector<std::pair<Placement, const VirtualDisplay*>> others;
-			for (size_t i = 1; i < virtuals.size(); i++) {
-				auto known = g_arrangement.find(virtuals[i].slot);
-				others.push_back({known != g_arrangement.end() ? known->second : Placement {'R', 1000 + virtuals[i].slot, 0}, &virtuals[i]});
+			// Displays without a screen of their own (or a second one on the same screen) go after
+			std::vector<int> keys;
+			std::map<int, SIZE> sizes;
+			for (size_t i = 0; i < virtuals.size(); i++) {
+				auto& mode = modes[virtuals[i].mode].sourceMode;
+				int key = sizes.count(virtuals[i].slot) ? 1000 + (int) i : virtuals[i].slot;
+				keys.push_back(key);
+				sizes[key] = {(LONG) mode.width, (LONG) mode.height};
 			}
-			std::sort(others.begin(), others.end(), [](auto& a, auto& b) {
-				return a.first.side != b.first.side ? a.first.side < b.first.side : a.first.rank < b.first.rank;
-			});
-			LONG right = w1, left = 0, below = h1, above = 0;
-			for (auto& [placement, v] : others) {
-				auto& mode = modes[v->mode].sourceMode;
-				LONG w = (LONG) mode.width, h = (LONG) mode.height;
-				switch (placement.side) {
-					case 'L':
-						left -= w;
-						mode.position = {left, (LONG) std::lround(placement.offset * h1)};
-						break;
-					case 'B':
-						mode.position = {(LONG) std::lround(placement.offset * w1), below};
-						below += h;
-						break;
-					case 'T':
-						above -= h;
-						mode.position = {(LONG) std::lround(placement.offset * w1), above};
-						break;
-					default:
-						mode.position = {right, (LONG) std::lround(placement.offset * h1)};
-						right += w;
-						break;
-				}
-				minX = (std::min)(minX, mode.position.x);
-				summary += v->name + L" ";
+			auto places = arrangeScreens(sizes, g_arrangement);
+			for (size_t i = 0; i < virtuals.size(); i++) {
+				auto& rc = places[keys[i]];
+				modes[virtuals[i].mode].sourceMode.position = {rc.left, rc.top};
+				minX = (std::min)(minX, rc.left);
+				summary += virtuals[i].name + L" " + rectText(rc) + L"; ";
 			}
 		} else {
 			LONG x = 0;
@@ -806,6 +954,9 @@ bool layoutRow() {
 		result = arrange(false);
 	}
 	wprintf(L"[SUDOVDA] Screens %ls%ls: %ld\n", summary.c_str(), remembered ? L"(as arranged before)" : L"in a row", result);
+	if (result == ERROR_SUCCESS) {
+		holdLayout(true);
+	}
 	if (result == ERROR_SUCCESS && !saved.empty()) {
 		if (!g_physicalDisabled) {
 			g_savedPaths = std::move(saved);
@@ -980,6 +1131,7 @@ static void serveBrokerClient(HANDLE pipe) {
 					layoutRow();
 				} else {
 					enforceWantedModes();
+					holdLayout(false);
 				}
 				wprintf(L"[SUDOVDA] Screen %u: %ls. Displays on: %ls\n", request.screen, name.c_str(), describeDisplays().c_str());
 				wcscpy_s(reply.deviceName, name.c_str());
@@ -1796,6 +1948,7 @@ bool removeVirtualDisplay(const GUID& guid) {
 		// How the user has the screens arranged, before one of them goes
 		std::lock_guard configLock(g_configMutex);
 		captureArrangement();
+		g_heldLayout.clear();
 	}
 
 	std::wstring removedName;

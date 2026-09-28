@@ -97,8 +97,9 @@ namespace VDISPLAY {
 	// Where the screens' arrangement (as the user last had it) is kept between streams
 	void setArrangementFile(const std::wstring& path);
 
-	// All virtual displays in a row by screen: screen 1 at 0,0 (the main display), then 2, 3;
-	// monitors that are on keep their layout, left of screen 1. restorePhysicalDisplays() undoes it.
+	// The virtual displays as the user last arranged them (else in a row by screen): screen 1 at
+	// 0,0 (the main display); monitors that are on keep their layout, left of screen 1. Held for a
+	// few seconds against Windows' own re-layout. restorePhysicalDisplays() undoes it.
 	bool layoutRow();
 
 	// At startup: if no physical display is on (e.g. left off by a crash), switch them on
