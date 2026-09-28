@@ -420,6 +420,26 @@ namespace {
 	}
 
 	/**
+	* A monitor is on (not ours, not another tool's virtual display). Windows can switch the
+	* monitors back on by itself a moment after they were switched off: when a screen reconnects
+	* right after the monitors came back (the stream menu's screen changes), it re-applies the
+	* layout it remembers, monitors on, after ours. Caller holds g_configMutex.
+	*/
+	bool physicalDisplayOn() {
+		std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+		std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+		if (!activePaths(paths, modes)) {
+			return false;
+		}
+		for (auto& path : paths) {
+			if (!isSudoPath(path) && !isOtherVirtualPath(path)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	* All our displays on. When a display arrives, Windows can re-apply what it remembers for that
 	* set of displays and put the new one in another's place, switching that one off: its screen
 	* then streams another screen's display. Each goes back on, on its own source if it's free (so
@@ -479,7 +499,11 @@ namespace {
 				std::lock_guard lock(g_configMutex);
 				// All session long, every 2 s: each screen at its stream's resolution
 				if (++ticks % 4 == 0 && virtualDisplayCount() > 0) {
-					if (ensureOwnDisplaysOn()) {
+					bool monitorOn = g_keepPhysicalOff && physicalDisplayOn();
+					if (monitorOn) {
+						printf("[SUDOVDA] A monitor came back on while streaming (Windows re-applied its layout): off again\n");
+					}
+					if (ensureOwnDisplaysOn() || monitorOn) {
 						if (g_keepPhysicalOff) {
 							keepOnlyVirtualDisplays();
 						}
