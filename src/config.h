@@ -174,6 +174,9 @@ namespace config {
     // Video encryption settings for LAN and WAN streams
     int lan_encryption_mode;
     int wan_encryption_mode;
+
+    // Lower the video bitrate while the network loses frames, back up when it stops
+    bool adaptive_bitrate;
   };
 
   struct nvhttp_t {

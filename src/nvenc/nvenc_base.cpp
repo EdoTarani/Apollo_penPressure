@@ -451,8 +451,51 @@ namespace nvenc {
       BOOST_LOG(info) << "NvEnc: created encoder " << video_format_string << quality_preset_string_from_guid(init_params.presetGUID) << extra;
     }
 
+    current_config = enc_config;
+    current_init_params = init_params;
+    current_init_params.encodeConfig = &current_config;
+
     encoder_state = {};
     fail_guard.disable();
+    return true;
+  }
+
+  bool nvenc_base::set_bitrate(uint32_t kbps) {
+    if (!encoder || !current_init_params.encodeConfig || kbps == 0) {
+      return false;
+    }
+    uint64_t old_bps = current_config.rcParams.averageBitRate;
+    uint64_t new_bps = (uint64_t) kbps * 1000;
+    if (old_bps == 0 || new_bps == old_bps) {
+      return old_bps != 0;
+    }
+
+    NV_ENC_CONFIG config = current_config;
+    auto scale = [&](uint32_t value) {
+      return (uint32_t) (value * new_bps / old_bps);
+    };
+    config.rcParams.averageBitRate = (uint32_t) new_bps;
+    if (config.rcParams.maxBitRate) {
+      config.rcParams.maxBitRate = scale(config.rcParams.maxBitRate);
+    }
+    if (config.rcParams.vbvBufferSize) {
+      config.rcParams.vbvBufferSize = scale(config.rcParams.vbvBufferSize);
+    }
+    if (config.rcParams.vbvInitialDelay) {
+      config.rcParams.vbvInitialDelay = scale(config.rcParams.vbvInitialDelay);
+    }
+
+    NV_ENC_RECONFIGURE_PARAMS params = {min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER)};
+    params.reInitEncodeParams = current_init_params;
+    params.reInitEncodeParams.encodeConfig = &config;
+    params.resetEncoder = 0;
+    params.forceIDR = 0;
+    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &params))) {
+      BOOST_LOG(error) << "NvEnc: NvEncReconfigureEncoder() for " << kbps << " kbps failed: " << last_nvenc_error_string;
+      return false;
+    }
+    current_config = config;
+    current_init_params.encodeConfig = &current_config;
     return true;
   }
 

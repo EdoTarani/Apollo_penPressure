@@ -421,6 +421,10 @@ namespace video {
       }
     }
 
+    bool set_bitrate(int kbps) override {
+      return device && device->nvenc && kbps > 0 && device->nvenc->set_bitrate((uint32_t) kbps);
+    }
+
     nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index) {
       if (!device || !device->nvenc) {
         return {};
@@ -2004,6 +2008,9 @@ namespace video {
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+    auto bitrate_events = mail->event<int>(mail::bitrate);
+    bool bitrate_unsupported_logged = false;
+    int applied_kbps = 0;
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -2054,6 +2061,21 @@ namespace video {
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
           session->invalidate_ref_frames(frames->first, frames->second);
+        }
+      }
+
+      // Adaptive bitrate (stream.cpp decides)
+      while (bitrate_events->peek()) {
+        if (auto kbps = bitrate_events->pop(0ms)) {
+          if (session->set_bitrate(*kbps)) {
+            if (*kbps != applied_kbps) {
+              BOOST_LOG(info) << "Adaptive bitrate: encoding at "sv << *kbps / 1000.0 << " Mbps"sv;
+              applied_kbps = *kbps;
+            }
+          } else if (!bitrate_unsupported_logged) {
+            BOOST_LOG(info) << "Adaptive bitrate: this encoder can't change its bitrate while streaming"sv;
+            bitrate_unsupported_logged = true;
+          }
         }
       }
 

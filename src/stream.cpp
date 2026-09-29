@@ -4,6 +4,8 @@
  */
 
 // standard includes
+#include <array>
+#include <atomic>
 #include <fstream>
 #include <future>
 #include <queue>
@@ -374,8 +376,20 @@ namespace stream {
 
       safe::mail_raw_t::event_t<bool> idr_events;
       safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
+      safe::mail_raw_t::event_t<int> bitrate_events;
 
       std::unique_ptr<platf::deinit_t> qos;
+
+      // Adaptive bitrate (adapt_bitrate()): frames the client couldn't recover, counted by the
+      // control stream, and the bitrate decided from them on the video broadcast thread
+      struct {
+        std::atomic<int> lost_frames {0};
+        int requested_kbps = 0;
+        int current_kbps = 0;
+        std::array<int, 2> lost_per_half_second {};
+        size_t slot = 0;
+        std::chrono::steady_clock::time_point last_check, last_change, last_loss, last_resend;
+      } adaptive;
     } video;
 
     struct {
@@ -959,6 +973,7 @@ namespace stream {
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
 
+      session->video.adaptive.lost_frames++;
       session->video.idr_events->raise(true);
     });
 
@@ -972,6 +987,7 @@ namespace stream {
         << "firstFrame [" << firstFrame << ']' << std::endl
         << "lastFrame [" << lastFrame << ']';
 
+      session->video.adaptive.lost_frames++;
       session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
     });
 
@@ -1324,6 +1340,60 @@ namespace stream {
     }
   }
 
+  /**
+   * Adaptive bitrate, like Parsec's. For each frame it couldn't recover, Moonlight asks for a
+   * repair (reference frame invalidation, or an IDR frame): counted per second, they show how much
+   * the network loses. With 2 or more lost in a second the encoder's bitrate goes down by 30% (not
+   * below a tenth of what the client asked for, or 2 Mbps), at most every 1.5 s; after 5 s without
+   * losses it goes back up by a tenth of the asked bitrate every 3 s, to what the client asked for.
+   * On a slow day the picture gets softer instead of losing frames. Runs on the video broadcast
+   * thread, twice a second at most.
+   */
+  void adapt_bitrate(session_t *session) {
+    auto &a = session->video.adaptive;
+    auto now = std::chrono::steady_clock::now();
+    if (a.requested_kbps <= 0) {
+      a.requested_kbps = a.current_kbps = session->config.monitor.bitrate;
+      a.last_check = a.last_change = a.last_loss = a.last_resend = now;
+      a.lost_frames = 0;  // the stream's start (Moonlight asks for a first IDR frame)
+      return;
+    }
+    if (!config::stream.adaptive_bitrate || now - a.last_check < 500ms) {
+      return;
+    }
+    a.last_check = now;
+
+    int lost = a.lost_frames.exchange(0);
+    a.lost_per_half_second[a.slot] = lost;
+    a.slot = (a.slot + 1) % a.lost_per_half_second.size();
+    int lost_last_second = 0;
+    for (auto n : a.lost_per_half_second) {
+      lost_last_second += n;
+    }
+    if (lost > 0) {
+      a.last_loss = now;
+    }
+
+    int floor = std::min(a.requested_kbps, std::max(2000, a.requested_kbps / 10));
+    int target = a.current_kbps;
+    if (lost_last_second >= 2 && now - a.last_change >= 1500ms) {
+      target = std::max(floor, a.current_kbps * 7 / 10);
+    } else if (now - a.last_loss >= 5s && now - a.last_change >= 3s && a.current_kbps < a.requested_kbps) {
+      target = std::min(a.requested_kbps, a.current_kbps + std::max(1000, a.requested_kbps / 10));
+    }
+    if (target != a.current_kbps) {
+      BOOST_LOG(info) << "Adaptive bitrate: "sv << a.current_kbps / 1000.0 << " -> "sv << target / 1000.0 << " Mbps ("sv
+                      << lost_last_second << " frames lost in the last second, "sv << a.requested_kbps / 1000.0 << " Mbps asked)"sv;
+      a.current_kbps = target;
+      a.last_change = a.last_resend = now;
+      session->video.bitrate_events->raise(target);
+    } else if (a.current_kbps < a.requested_kbps && now - a.last_resend >= 5s) {
+      // Again now and then: an encoder recreated (the display changed) starts at the asked bitrate
+      a.last_resend = now;
+      session->video.bitrate_events->raise(a.current_kbps);
+    }
+  }
+
   void videoBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     auto packets = mail::man->queue<video::packet_t>(mail::video_packets);
@@ -1358,6 +1428,8 @@ namespace stream {
 
       auto session = (session_t *) packet->channel_data;
       auto lowseq = session->video.lowseq;
+
+      adapt_bitrate(session);
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
       std::vector<uint8_t> payload_with_replacements;
@@ -2188,6 +2260,7 @@ namespace stream {
 
       session->video.idr_events = mail->event<bool>(mail::idr);
       session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+      session->video.bitrate_events = mail->event<int>(mail::bitrate);
       session->video.lowseq = 0;
       session->video.ping_payload = launch_session.av_ping_payload;
       if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {

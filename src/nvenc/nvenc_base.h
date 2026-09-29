@@ -69,6 +69,13 @@ namespace nvenc {
      */
     bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame);
 
+    /**
+     * @brief Change the average bitrate without restarting (no IDR frame); VBV buffer and max bitrate scale with it.
+     * @param kbps New bitrate in kilobits per second.
+     * @return `true` on success, `false` on error (the encoder keeps its previous bitrate).
+     */
+    bool set_bitrate(uint32_t kbps);
+
   protected:
     /**
      * @brief Required. Used for loading NvEnc library and setting `nvenc` variable with `NvEncodeAPICreateInstance()`.
@@ -143,6 +150,10 @@ namespace nvenc {
   private:
     NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
     uint32_t minimum_api_version = 0;
+
+    // The parameters the encoder was initialized with, for set_bitrate()
+    NV_ENC_INITIALIZE_PARAMS current_init_params = {};
+    NV_ENC_CONFIG current_config = {};
 
     struct {
       uint64_t last_encoded_frame_index = 0;
