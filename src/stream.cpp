@@ -1347,6 +1347,7 @@ namespace stream {
     }
 
     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
+    uint64_t logged_pacing_bps = 0;
 
     while (auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
@@ -1460,8 +1461,23 @@ namespace stream {
       }
 
       try {
-        // Use around 80% of 1Gbps          1Gbps            percent    ms     packet      byte
-        size_t ratecontrol_packets_in_1ms = std::giga::num * 80 / 100 / 1000 / blocksize / 8;
+        // How fast a frame's packets go out: on a LAN, around 80% of 1 Gbps. A client streaming
+        // remotely (Moonlight asks for 1024-byte packets over a VPN or the internet) gets them
+        // spread out instead: a VPN tunnel or an office firewall with small buffers drops the
+        // tail of a sub-millisecond burst even at a low average bitrate (over a company VPN, 40%
+        // of the frames were lost at 10 Mbps; Parsec, pacing gently, had no trouble). There a
+        // frame goes out at 4x the stream's bitrate (at least 20 Mbps): about a quarter of an
+        // average frame interval.
+        uint64_t pacing_bps = std::giga::num * 80 / 100;
+        if (session->config.packetsize <= 1024 && session->config.monitor.bitrate > 0) {
+          pacing_bps = std::min<uint64_t>(pacing_bps, std::max<uint64_t>(20'000'000, 4ULL * session->config.monitor.bitrate * 1000));
+        }
+        if (pacing_bps != logged_pacing_bps) {
+          BOOST_LOG(info) << "Video pacing: "sv << pacing_bps / 1'000'000 << " Mbps ("sv << session->config.monitor.bitrate / 1000
+                          << " Mbps stream, "sv << session->config.packetsize << "-byte packets)"sv;
+          logged_pacing_bps = pacing_bps;
+        }
+        size_t ratecontrol_packets_in_1ms = std::max<size_t>(1, pacing_bps / 1000 / blocksize / 8);
 
         // Send less than 64K in a single batch.
         // On Windows, batches above 64K seem to bypass SO_SNDBUF regardless of its size,
