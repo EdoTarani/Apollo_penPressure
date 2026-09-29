@@ -111,6 +111,11 @@ namespace proc {
     bool virtual_display = false;
     bool allow_client_commands = false;
 
+    // The resolution the running app's client asked for (before any scaling): a client coming
+    // back at another one gets the app started afresh on a new display (nvhttp)
+    int client_width = 0;
+    int client_height = 0;
+
     proc_t(
       boost::process::v1::environment &&env,
       std::vector<ctx_t> &&apps

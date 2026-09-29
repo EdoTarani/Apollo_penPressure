@@ -1206,9 +1206,46 @@ namespace nvhttp {
     }
   }
 
+  /**
+   * A client coming back to the running app at another resolution. The app's virtual display
+   * keeps the size it was made at, so resuming would show the old resolution (scaled, the
+   * desktop's layout for the old size) until the PC restarts. Instead the app ends here and the
+   * caller starts it afresh, on a display of the new size. Only while nobody is streaming it.
+   * `for_app`: a launch, which must name the running app (a resume always means it).
+   */
+  static void end_app_for_new_resolution(req_https_t request, bool for_app) {
+    if (config::nvhttp.extra_screen_index > 0 || !proc::proc.virtual_display || proc::proc.running() == 0 ||
+        rtsp_stream::session_count() > 0 || proc::proc.client_width <= 0 || proc::proc.client_height <= 0) {
+      return;
+    }
+    auto args = request->parse_query_string();
+    if (for_app) {
+      auto appid = util::from_view(get_arg(args, "appid", "0"));
+      std::string appuuid {get_arg(args, "appuuid", "")};
+      if (appid != proc::proc.running() && (appuuid.empty() || appuuid != proc::proc.get_running_app_uuid())) {
+        return;
+      }
+    }
+
+    // As make_launch_session() reads it: the client's mode, or the one set for this client
+    auto named_cert_p = get_verified_cert(request);
+    std::string mode {named_cert_p->display_mode.empty() ? std::string {get_arg(args, "mode", config::video.fallback_mode.c_str())} : named_cert_p->display_mode};
+    int width = 0, height = 0;
+    if (std::sscanf(mode.c_str(), "%dx%d", &width, &height) != 2 || width <= 0 || height <= 0) {
+      return;
+    }
+    if (width == proc::proc.client_width && height == proc::proc.client_height) {
+      return;
+    }
+    BOOST_LOG(info) << "Client back at "sv << width << 'x' << height << ", the app runs at "sv << proc::proc.client_width << 'x'
+                    << proc::proc.client_height << ": starting it afresh on a new display"sv;
+    proc::proc.terminate();
+  }
+
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
     settle_ending_sessions();
+    end_app_for_new_resolution(request, true);
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -1424,6 +1461,7 @@ namespace nvhttp {
     // last client left (the client saw it still running a moment before), or this is an extra
     // screen, whose one window's new connection always starts over with its own display
     settle_ending_sessions();
+    end_app_for_new_resolution(request, false);
     if (proc::proc.running() == 0 || config::nvhttp.extra_screen_index > 0) {
       auto args = request->parse_query_string();
       if (args.find("appid"s) != std::end(args) || args.find("appuuid"s) != std::end(args)) {

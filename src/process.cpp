@@ -204,6 +204,8 @@ namespace proc {
 
     uint32_t client_width = launch_session->width ? launch_session->width : 1920;
     uint32_t client_height = launch_session->height ? launch_session->height : 1080;
+    this->client_width = (int) client_width;
+    this->client_height = (int) client_height;
 
     uint32_t render_width = client_width;
     uint32_t render_height = client_height;
