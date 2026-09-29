@@ -198,7 +198,14 @@ namespace system_tray {
 
     // Wait for the shell to be initialized before registering the tray icon.
     // This ensures the tray icon works reliably after a logoff/logon cycle.
+    // Started at boot, Apollo runs before anyone signs in: this can take minutes.
+    if (GetShellWindow() == nullptr) {
+      BOOST_LOG(info) << "System tray: waiting for the Windows desktop (nobody signed in yet)"sv;
+    }
     while (GetShellWindow() == nullptr) {
+      if (tray_thread_should_exit) {
+        return 1;
+      }
       Sleep(1000);
     }
   #endif
@@ -462,33 +469,10 @@ namespace system_tray {
     tray_thread_should_exit = false;
 
     try {
+      // The tray icon appears whenever the Windows desktop is there: started at boot, Apollo
+      // runs before anyone signs in, and giving up after 10 s (as before) meant never having one
       tray_thread = std::thread(tray_thread_worker);
-
-      // Wait for the thread to start and initialize
-      const auto start_time = std::chrono::steady_clock::now();
-      while (!tray_thread_running && !tray_thread_should_exit) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
-        // Timeout after 10 seconds
-        if (std::chrono::steady_clock::now() - start_time > std::chrono::seconds(10)) {
-          BOOST_LOG(error) << "Tray thread initialization timeout"sv;
-          tray_thread_should_exit = true;
-          if (tray_thread.joinable()) {
-            tray_thread.join();
-          }
-          return 1;
-        }
-      }
-
-      if (!tray_thread_running) {
-        BOOST_LOG(error) << "Tray thread failed to start"sv;
-        if (tray_thread.joinable()) {
-          tray_thread.join();
-        }
-        return 1;
-      }
-
-      BOOST_LOG(info) << "System tray thread initialized successfully"sv;
+      BOOST_LOG(info) << "System tray thread started (the icon appears once the Windows desktop is up)"sv;
       return 0;
     } catch (const std::exception &e) {
       BOOST_LOG(error) << "Failed to create tray thread: " << e.what();
@@ -497,7 +481,8 @@ namespace system_tray {
   }
 
   int end_tray_threaded() {
-    if (!tray_thread_running) {
+    // Also while it's still waiting for the desktop
+    if (!tray_thread.joinable()) {
       return 0;
     }
 
