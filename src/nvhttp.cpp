@@ -1227,8 +1227,13 @@ namespace nvhttp {
       }
     }
 
-    // As make_launch_session() reads it: the client's mode, or the one set for this client
+    // Only a client that may launch apps may end the running one
     auto named_cert_p = get_verified_cert(request);
+    if (named_cert_p == nullptr || !(named_cert_p->perm & PERM::launch)) {
+      return;
+    }
+
+    // As make_launch_session() reads it: the client's mode, or the one set for this client
     std::string mode {named_cert_p->display_mode.empty() ? std::string {get_arg(args, "mode", config::video.fallback_mode.c_str())} : named_cert_p->display_mode};
     int width = 0, height = 0;
     if (std::sscanf(mode.c_str(), "%dx%d", &width, &height) != 2 || width <= 0 || height <= 0) {
