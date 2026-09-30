@@ -128,7 +128,21 @@ namespace {
 		return DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS ? std::wstring(source.viewGdiDeviceName) : std::wstring();
 	}
 
+	/**
+	* A path of our virtual displays: on SudoVDA's adapter, known from the displays we created, else
+	* by the adapter's name. Windows can take a moment to list a new display's adapter name: by name
+	* alone, a screen's display just added looked like a monitor, and was switched off with them.
+	* Callers don't hold g_createdMutex.
+	*/
 	bool isSudoPath(const DISPLAYCONFIG_PATH_INFO& path) {
+		{
+			std::lock_guard lock(g_createdMutex);
+			for (auto& [key, target] : g_targets) {
+				if (target.first.LowPart == path.targetInfo.adapterId.LowPart && target.first.HighPart == path.targetInfo.adapterId.HighPart) {
+					return true;
+				}
+			}
+		}
 		auto name = sourceName(path);
 		return !name.empty() && isSudoAdapter(name.c_str());
 	}
@@ -188,7 +202,7 @@ namespace {
 				continue;
 			}
 			auto name = sourceName(path);
-			if (name.empty() || !isSudoAdapter(name.c_str())) {
+			if (name.empty() || !isSudoPath(path)) {
 				continue;
 			}
 			auto& mode = modes[idx].sourceMode;
@@ -381,7 +395,7 @@ namespace {
 		std::vector<std::pair<std::wstring, std::array<int, 3>>> wanted;
 		for (auto& path : paths) {
 			auto name = sourceName(path);
-			if (name.empty() || !isSudoAdapter(name.c_str())) {
+			if (name.empty() || !isSudoPath(path)) {
 				continue;
 			}
 			auto known = asked.find(name);
@@ -494,13 +508,17 @@ namespace {
 		}
 		g_holdThreadStarted = true;
 		std::thread([] {
+			int monitorChecks = 0;
 			for (unsigned ticks = 0;;) {
 				Sleep(500);
 				std::lock_guard lock(g_configMutex);
 				// All session long, every 2 s: each screen at its stream's resolution
 				if (++ticks % 4 == 0 && virtualDisplayCount() > 0) {
-					bool monitorOn = g_keepPhysicalOff && physicalDisplayOn();
+					// Twice in a row (about 4 s): not a moment while a display arrives
+					monitorChecks = (g_keepPhysicalOff && physicalDisplayOn()) ? monitorChecks + 1 : 0;
+					bool monitorOn = monitorChecks >= 2;
 					if (monitorOn) {
+						monitorChecks = 0;
 						printf("[SUDOVDA] A monitor came back on while streaming (Windows re-applied its layout): off again\n");
 					}
 					if (ensureOwnDisplaysOn() || monitorOn) {
@@ -774,7 +792,7 @@ bool arrangeInRow(const wchar_t* deviceName, int slot) {
 		auto& mode = modes[idx].sourceMode;
 		if (_wcsicmp(source.viewGdiDeviceName, deviceName) == 0) {
 			ours = &mode;
-		} else if (!isSudoAdapter(source.viewGdiDeviceName)) {
+		} else if (!isSudoPath(path)) {
 			right = (std::max)(right, mode.position.x + (LONG) mode.width);
 		}
 	}
@@ -935,7 +953,7 @@ bool makeMainDisplay(const wchar_t* deviceName) {
 		if (_wcsicmp(source.viewGdiDeviceName, deviceName) == 0 && idx < modes.size()) {
 			origin = modes[idx].sourceMode.position;
 			found = true;
-		} else if (!isSudoAdapter(source.viewGdiDeviceName)) {
+		} else if (!isSudoPath(path)) {
 			for (auto* i : {&path.sourceInfo.modeInfoIdx, &path.targetInfo.modeInfoIdx}) {
 				if (*i != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && *i < modes.size()) {
 					savedModes.push_back(modes[*i]);
@@ -1006,7 +1024,7 @@ bool layoutRow() {
 		if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS) {
 			continue;
 		}
-		if (isSudoAdapter(source.viewGdiDeviceName)) {
+		if (isSudoPath(path)) {
 			auto known = g_slots.find(source.viewGdiDeviceName);
 			int slot = known != g_slots.end() ? known->second : 100 + (int) virtuals.size();
 			virtuals.push_back({slot, idx, source.viewGdiDeviceName});
